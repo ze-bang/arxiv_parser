@@ -1,0 +1,7 @@
+requests
+feedparser
+python-dotenv
+openai
+beautifulsoup4
+scholarly
+google-api-python-client
