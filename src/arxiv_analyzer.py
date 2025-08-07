@@ -102,41 +102,215 @@ def _fallback_duckduckgo_search(query):
         return []
 
 def get_author_info(author_name):
-    """Gets author information from Google Scholar and web search."""
-    try:
-        # First try to get data from Google Scholar
-        search_query = scholarly.search_author(author_name)
-        author = next(search_query)
-        scholar_info = {
-            'h_index': author.get('hindex', 'N/A'),
-            'recent_publications': [pub['bib']['title'] for pub in author.get('publications', [])[:3]]
-        }
-    except (StopIteration, Exception):
-        scholar_info = {
-            'h_index': 'N/A',
-            'recent_publications': []
-        }
+    """Gets author information using multiple sources with smart disambiguation."""
+    print(f"   🔍 Looking up author: {author_name}")
     
-    # Supplement with web search for additional context
+    # Clean author name for better search results
+    cleaned_name = author_name.strip()
+    
+    # Initialize result structure
+    author_info = {
+        'h_index': 'N/A',
+        'i10_index': 'N/A',
+        'recent_publications': [],
+        'citations': 'N/A',
+        'affiliation': 'N/A',
+        'source': 'none',
+        'confidence': 'low'
+    }
+    
+    def smart_scholar_search(name):
+        """Smart Google Scholar search with disambiguation."""
+        try:
+            print(f"      📚 Searching Google Scholar for: {name}")
+            
+            # Get multiple candidates
+            search_query = scholarly.search_author(name)
+            candidates = []
+            
+            for i, candidate in enumerate(search_query):
+                if i >= 4:  # Limit to prevent too many API calls
+                    break
+                candidates.append(candidate)
+            
+            if not candidates:
+                return None
+            
+            # Physics-related keywords for disambiguation
+            physics_keywords = [
+                'condensed matter', 'solid state', 'materials science', 'quantum',
+                'superconductivity', 'magnetism', 'semiconductor', 'crystal',
+                'electronic', 'optical', 'thermal', 'physics', 'nanoscale'
+            ]
+            
+            best_candidate = None
+            best_score = -1
+            
+            print(f"      🔍 Evaluating {len(candidates)} candidates...")
+            
+            for idx, candidate in enumerate(candidates):
+                score = 0
+                interests = candidate.get('interests', [])
+                affiliation = candidate.get('affiliation', '').lower()
+                citations = candidate.get('citedby', 0)
+                
+                # Score based on research interests (highest weight)
+                physics_matches = 0
+                for interest in interests:
+                    for keyword in physics_keywords:
+                        if keyword.lower() in interest.lower():
+                            physics_matches += 1
+                            break
+                score += physics_matches * 3
+                
+                # Score based on affiliation
+                if any(term in affiliation for term in ['physics', 'materials', 'condensed']):
+                    score += 2
+                elif any(term in affiliation for term in ['university', 'institute', 'national lab']):
+                    score += 1
+                
+                # Bonus for high citations (prominence indicator)
+                if citations > 1000:
+                    score += 2
+                elif citations > 100:
+                    score += 1
+                
+                print(f"         #{idx+1}: {candidate.get('name', 'Unknown')} "
+                      f"(physics matches: {physics_matches}, citations: {citations}, score: {score})")
+                
+                if score > best_score:
+                    best_score = score
+                    best_candidate = candidate
+            
+            if best_candidate and best_score > 0:
+                print(f"      🎯 Selected best match (score: {best_score})")
+                return best_candidate, 'high' if best_score >= 4 else 'medium'
+            elif best_candidate:
+                print(f"      ⚠️ Using first result (low confidence, score: {best_score})")
+                return best_candidate, 'low'
+            
+            return None, 'none'
+            
+        except Exception as e:
+            print(f"      ❌ Scholar search error: {str(e)[:100]}...")
+            return None, 'none'
+    
+    # Try Google Scholar with disambiguation
     try:
-        web_results = web_search(f"{author_name} physicist h-index citations recent work")
+        # First try basic search
+        result = smart_scholar_search(cleaned_name)
         
-        # Extract additional information from web search
-        web_context = ""
-        if web_results:
-            for result in web_results[:2]:  # Take top 2 results
-                if result.get('snippet'):
-                    web_context += result['snippet'] + " "
+        # If no good match, try with physics context
+        if not result[0] or result[1] == 'low':
+            print(f"      🔄 Trying with physics context...")
+            physics_result = smart_scholar_search(f"{cleaned_name} physics")
+            if physics_result[0] and physics_result[1] != 'none':
+                result = physics_result
         
-        return {
-            'h_index': scholar_info['h_index'],
-            'recent_publications': scholar_info['recent_publications'],
-            'web_context': web_context.strip()
-        }
-        
+        if result[0]:
+            author, confidence = result
+            
+            # Fill detailed information
+            print(f"      📖 Fetching detailed profile...")
+            filled_author = scholarly.fill(author, sections=['basics', 'indices', 'publications'])
+            
+            author_info = {
+                'h_index': filled_author.get('hindex', 'N/A'),
+                'i10_index': filled_author.get('i10index', 'N/A'),
+                'recent_publications': [pub['bib']['title'] for pub in filled_author.get('publications', [])[:3]],
+                'citations': filled_author.get('citedby', 'N/A'),
+                'affiliation': filled_author.get('affiliation', 'N/A'),
+                'interests': filled_author.get('interests', []),
+                'source': 'google_scholar',
+                'confidence': confidence
+            }
+            
+            print(f"      ✅ Found: h-index={author_info['h_index']}, "
+                  f"i10-index={author_info['i10_index']}, citations={author_info['citations']}")
+            
     except Exception as e:
-        print(f"Web search error for author {author_name}: {e}")
-        return scholar_info
+        print(f"      ⚠️ Scholar error: {str(e)[:100]}...")
+        
+        # Try with proxy if blocked
+        try:
+            print(f"      🔄 Retrying with proxy...")
+            from scholarly import ProxyGenerator
+            pg = ProxyGenerator()
+            pg.FreeProxies()
+            scholarly.use_proxy(pg)
+            
+            result = smart_scholar_search(cleaned_name)
+            if result[0]:
+                author, confidence = result
+                filled_author = scholarly.fill(author, sections=['basics', 'indices', 'publications'])
+                author_info.update({
+                    'h_index': filled_author.get('hindex', 'N/A'),
+                    'i10_index': filled_author.get('i10index', 'N/A'),
+                    'recent_publications': [pub['bib']['title'] for pub in filled_author.get('publications', [])[:3]],
+                    'citations': filled_author.get('citedby', 'N/A'),
+                    'affiliation': filled_author.get('affiliation', 'N/A'),
+                    'source': 'google_scholar_proxy',
+                    'confidence': confidence
+                })
+                print(f"      ✅ Found via proxy: h-index={author_info['h_index']}")
+                
+        except Exception as proxy_e:
+            print(f"      ❌ Proxy failed: {str(proxy_e)[:100]}...")
+    
+    # Fallback: Try web search for h-index if Scholar failed
+    if author_info['h_index'] == 'N/A':
+        try:
+            print(f"      🌐 Web search fallback for h-index...")
+            web_results = web_search(f'"{cleaned_name}" physicist h-index citations research')
+            
+            if web_results:
+                print(f"      📄 Found {len(web_results)} web results")
+                web_context = ""
+                for i, result in enumerate(web_results[:2]):
+                    if result.get('snippet'):
+                        web_context += f"[Source {i+1}] {result['snippet']} "
+                
+                # Try to extract h-index from web results
+                import re
+                h_index_patterns = [
+                    r'h-index[:\s]+(\d+)',
+                    r'h index[:\s]+(\d+)',
+                    r'hirsch index[:\s]+(\d+)',
+                    r'citation h-index[:\s]+(\d+)'
+                ]
+                
+                for pattern in h_index_patterns:
+                    matches = re.findall(pattern, web_context.lower())
+                    if matches:
+                        author_info['h_index'] = int(matches[0])
+                        author_info['source'] = 'web_search'
+                        author_info['confidence'] = 'low'
+                        print(f"      📊 Extracted h-index from web: {author_info['h_index']}")
+                        break
+            else:
+                print(f"      ❌ No web results found")
+                
+        except Exception as e:
+            print(f"      ⚠️ Web search error: {str(e)[:100]}...")
+    
+    # Final result compilation
+    final_info = {
+        'h_index': author_info['h_index'],
+        'i10_index': author_info.get('i10_index', 'N/A'),
+        'recent_publications': author_info['recent_publications'],
+        'citations': author_info['citations'],
+        'affiliation': author_info['affiliation'],
+        'interests': author_info.get('interests', []),
+        'source': author_info['source'],
+        'confidence': author_info['confidence'],
+        'scholar_found': author_info['source'] in ['google_scholar', 'google_scholar_proxy']
+    }
+    
+    print(f"      📋 Final result: h-index={final_info['h_index']}, "
+          f"i10-index={final_info['i10_index']}, source={final_info['source']}, "
+          f"confidence={final_info['confidence']}")
+    
+    return final_info
 
 def get_topic_prevalence(topic):
     """Gets the prevalence of a topic using web search with journal impact and time decay."""
@@ -237,23 +411,34 @@ def get_topic_prevalence(topic):
         print(f"Error in web search: {e}")
         return "Unknown"
 
+# Global author cache to avoid repeated API calls
+_author_cache = {}
+
 def analyze_paper_impact(paper):
     """Analyzes the potential impact of a paper."""
     title = paper.title
     authors = [author.name for author in paper.authors]
     summary = paper.summary
 
-    # Cache author info to avoid duplicate API calls
-    author_info_cache = {}
+    print(f"🔍 Analyzing paper: {title[:60]}...")
+    print(f"👥 Authors: {', '.join(authors)}")
+
+    # Use global cache for author info to avoid duplicate API calls
+    global _author_cache
     author_info = []
-    for author in authors:
-        if author not in author_info_cache:
-            author_info_cache[author] = get_author_info(author)
-        author_info.append(author_info_cache[author])
+    
+    for author_name in authors:
+        if author_name not in _author_cache:
+            print(f"   📋 Fetching new author data for: {author_name}")
+            _author_cache[author_name] = get_author_info(author_name)
+        else:
+            print(f"   💾 Using cached data for: {author_name}")
+        author_info.append(_author_cache[author_name])
 
     # A simple way to get topics is to use the summary.
     # A more advanced approach would be to use NLP to extract keywords.
     topics = summary.split('.')[0] # Use the first sentence as a proxy for topics
+    print(f"🔬 Analyzing topic prevalence for: {topics[:60]}...")
     topic_prevalence = get_topic_prevalence(topics)
 
     prompt = f"""
@@ -277,6 +462,7 @@ def analyze_paper_impact(paper):
     """
 
     try:
+        print(f"🤖 Getting AI analysis...")
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
@@ -284,9 +470,13 @@ def analyze_paper_impact(paper):
                 {"role": "user", "content": prompt}
             ]
         )
-        return response.choices[0].message.content
+        result = response.choices[0].message.content
+        print(f"✅ Analysis complete")
+        return result
     except Exception as e:
-        return f"Error analyzing paper: {e}"
+        error_msg = f"Error analyzing paper: {e}"
+        print(f"❌ {error_msg}")
+        return error_msg
 
 def main(m=5):
     """Main function to get and analyze papers."""
@@ -369,10 +559,33 @@ def main(m=5):
             # Author details with h-index
             print_and_save(f"\n👥 AUTHORS ({len(paper.authors)} total):", output_file)
             for author in paper.authors:
-                author_info = get_author_info(author.name)
+                # Use cached author info instead of calling get_author_info again
+                if author.name in _author_cache:
+                    author_info = _author_cache[author.name]
+                else:
+                    # Fallback if somehow not in cache
+                    author_info = get_author_info(author.name)
+                
                 h_index = author_info.get('h_index', 'N/A')
+                i10_index = author_info.get('i10_index', 'N/A')
                 recent_pubs = len(author_info.get('recent_publications', []))
-                author_detail = f"   • {author.name} (h-index: {h_index}, recent pubs: {recent_pubs})"
+                citations = author_info.get('citations', 'N/A')
+                affiliation = author_info.get('affiliation', 'N/A')
+                confidence = author_info.get('confidence', 'unknown')
+                
+                author_detail = f"   • {author.name}"
+                author_detail += f" (h-index: {h_index}"
+                if i10_index != 'N/A':
+                    author_detail += f", i10-index: {i10_index}"
+                if citations != 'N/A':
+                    author_detail += f", citations: {citations}"
+                author_detail += f", recent pubs: {recent_pubs}"
+                if confidence != 'unknown':
+                    author_detail += f", confidence: {confidence}"
+                if affiliation != 'N/A' and affiliation:
+                    author_detail += f", {affiliation[:40]}..."
+                author_detail += ")"
+                
                 print_and_save(author_detail, output_file)
             
             # Extract topics from paper summary
@@ -459,15 +672,27 @@ def main(m=5):
                 elif line.startswith('Justification:'):
                     justification_text = line.replace('Justification:', '').strip()
             
-            # Get author data
+            # Get author data from cache
             authors_data = []
             for author in paper.authors:
-                author_info = get_author_info(author.name)
+                if author.name in _author_cache:
+                    author_info = _author_cache[author.name]
+                else:
+                    # Fallback if somehow not in cache
+                    author_info = get_author_info(author.name)
+                
                 authors_data.append({
                     "name": author.name,
                     "h_index": author_info.get('h_index', 'N/A'),
+                    "i10_index": author_info.get('i10_index', 'N/A'),
+                    "citations": author_info.get('citations', 'N/A'),
+                    "affiliation": author_info.get('affiliation', 'N/A'),
+                    "interests": author_info.get('interests', []),
                     "recent_publications_count": len(author_info.get('recent_publications', [])),
-                    "recent_publications": author_info.get('recent_publications', [])
+                    "recent_publications": author_info.get('recent_publications', []),
+                    "scholar_found": author_info.get('scholar_found', False),
+                    "confidence": author_info.get('confidence', 'unknown'),
+                    "source": author_info.get('source', 'none')
                 })
             
             topics = paper.summary.split('.')[0]
