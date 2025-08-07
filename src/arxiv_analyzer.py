@@ -5,6 +5,8 @@ from scholarly import scholarly
 from bs4 import BeautifulSoup
 import requests
 from dotenv import load_dotenv
+from datetime import datetime
+import json
 
 load_dotenv()
 
@@ -204,7 +206,7 @@ def get_topic_prevalence(topic):
                 time_decay = 0.5  # Default moderate decay if parsing fails
             
             # Calculate weighted score for this paper
-            paper_score = activity_score * journal_boost * time_decay
+            paper_score = (activity_score + journal_boost) * time_decay
             total_score += paper_score
             paper_count += 1
             
@@ -241,7 +243,13 @@ def analyze_paper_impact(paper):
     authors = [author.name for author in paper.authors]
     summary = paper.summary
 
-    author_info = [get_author_info(author) for author in authors]
+    # Cache author info to avoid duplicate API calls
+    author_info_cache = {}
+    author_info = []
+    for author in authors:
+        if author not in author_info_cache:
+            author_info_cache[author] = get_author_info(author)
+        author_info.append(author_info_cache[author])
 
     # A simple way to get topics is to use the summary.
     # A more advanced approach would be to use NLP to extract keywords.
@@ -282,39 +290,217 @@ def analyze_paper_impact(paper):
 
 def main(m=5):
     """Main function to get and analyze papers."""
-    print("Fetching papers from arXiv...")
-    papers = get_arxiv_papers()
+    # Create timestamped output filename
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    output_filename = f"arxiv_analysis_{timestamp}.txt"
     
-    if not papers:
-        print("No papers found.")
-        return
+    def print_and_save(text, file_handle=None):
+        """Print to console and save to file"""
+        print(text)
+        if file_handle:
+            file_handle.write(text + '\n')
+    
+    with open(output_filename, 'w', encoding='utf-8') as output_file:
+        header_line = "=" * 80
+        title_line = "🔬 arXiv Paper Impact Analyzer - Condensed Matter Physics"
+        date_line = f"📅 Analysis Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        category_line = f"🎯 Target Category: cond-mat.str-el"
+        papers_line = f"📊 Analyzing top {m} papers by potential impact"
+        
+        print_and_save(header_line, output_file)
+        print_and_save(title_line, output_file)
+        print_and_save(header_line, output_file)
+        print_and_save(date_line, output_file)
+        print_and_save(category_line, output_file)
+        print_and_save(papers_line, output_file)
+        print_and_save(header_line, output_file)
+        
+        print_and_save("\n🔍 Fetching papers from arXiv...", output_file)
+        papers = get_arxiv_papers()
+        
+        if not papers:
+            print_and_save("❌ No papers found.", output_file)
+            return
 
-    analyzed_papers = []
-    for paper in papers:
-        print(f"Analyzing: {paper.title}")
-        analysis = analyze_paper_impact(paper)
-        analyzed_papers.append({'paper': paper, 'analysis': analysis})
+        print_and_save(f"✅ Found {len(papers)} papers. Beginning detailed analysis...\n", output_file)
+        
+        analyzed_papers = []
+        for i, paper in enumerate(papers, 1):
+            progress_msg = f"📄 [{i}/{len(papers)}] Analyzing: {paper.title[:80]}..."
+            print_and_save(progress_msg, output_file)
+            analysis = analyze_paper_impact(paper)
+            analyzed_papers.append({'paper': paper, 'analysis': analysis})
 
-    # Sort papers by score (assuming the score is at the beginning of the analysis string)
-    def get_score(item):
-        try:
-            score_line = item['analysis'].split('\n')[0]
-            score = int(score_line.split(': ')[1])
-            return score
-        except (IndexError, ValueError):
-            return 0
+        # Sort papers by score (assuming the score is at the beginning of the analysis string)
+        def get_score(item):
+            try:
+                score_line = item['analysis'].split('\n')[0]
+                score = int(score_line.split(': ')[1])
+                return score
+            except (IndexError, ValueError):
+                return 0
 
-    analyzed_papers.sort(key=get_score, reverse=True)
+        analyzed_papers.sort(key=get_score, reverse=True)
 
-    print(f"\n--- Top {m} Potentially Impactful Papers ---")
-    for item in analyzed_papers[:m]:
-        print(f"\nTitle: {item['paper'].title}")
-        print(f"Authors: {', '.join(author.name for author in item['paper'].authors)}")
-        print(f"Published: {item['paper'].published}")
-        print(f"Link: {item['paper'].link}")
-        print("\n--- Analysis ---")
-        print(item['analysis'])
-        print("------------------")
+        print_and_save("\n" + "=" * 80, output_file)
+        print_and_save(f"🏆 TOP {m} POTENTIALLY IMPACTFUL PAPERS", output_file)
+        print_and_save("=" * 80, output_file)
+        
+        for rank, item in enumerate(analyzed_papers[:m], 1):
+            paper = item['paper']
+            analysis = item['analysis']
+            
+            # Extract score from analysis
+            try:
+                score_line = analysis.split('\n')[0]
+                impact_score = score_line.split(': ')[1]
+            except:
+                impact_score = "N/A"
+            
+            print_and_save(f"\n🥇 RANK #{rank} | IMPACT SCORE: {impact_score}/10", output_file)
+            print_and_save("─" * 80, output_file)
+            
+            # Paper details
+            print_and_save(f"📋 TITLE: {paper.title}", output_file)
+            print_and_save(f"📅 PUBLISHED: {paper.published}", output_file)
+            print_and_save(f"🔗 ARXIV LINK: {paper.link}", output_file)
+            print_and_save(f"🏷️  ARXIV ID: {paper.id.split('/')[-1]}", output_file)
+            
+            # Author details with h-index
+            print_and_save(f"\n👥 AUTHORS ({len(paper.authors)} total):", output_file)
+            for author in paper.authors:
+                author_info = get_author_info(author.name)
+                h_index = author_info.get('h_index', 'N/A')
+                recent_pubs = len(author_info.get('recent_publications', []))
+                author_detail = f"   • {author.name} (h-index: {h_index}, recent pubs: {recent_pubs})"
+                print_and_save(author_detail, output_file)
+            
+            # Extract topics from paper summary
+            topics = paper.summary.split('.')[0]
+            print_and_save(f"\n🔬 RESEARCH TOPICS:", output_file)
+            print_and_save(f"   Primary: {topics}", output_file)
+            
+            # Topic prevalence analysis
+            topic_prevalence = get_topic_prevalence(topics)
+            print_and_save(f"   📈 Topic Prevalence: {topic_prevalence}", output_file)
+            
+            # Abstract preview
+            abstract_preview = paper.summary[:300] + "..." if len(paper.summary) > 300 else paper.summary
+            print_and_save(f"\n📝 ABSTRACT PREVIEW:", output_file)
+            print_and_save(f"   {abstract_preview}", output_file)
+            
+            print_and_save(f"\n🤖 AI IMPACT ANALYSIS:", output_file)
+            print_and_save("─" * 40, output_file)
+            # Format the analysis output nicely
+            analysis_lines = analysis.split('\n')
+            for line in analysis_lines:
+                if line.strip():
+                    if line.startswith('Score:'):
+                        print_and_save(f"   🎯 {line}", output_file)
+                    elif line.startswith('Summary:'):
+                        print_and_save(f"   📄 {line}", output_file)
+                    elif line.startswith('Justification:'):
+                        print_and_save(f"   💡 {line}", output_file)
+                    else:
+                        print_and_save(f"      {line}", output_file)
+            
+            print_and_save("\n" + "─" * 80, output_file)
+            if rank < m:  # Don't print separator after last item
+                print_and_save("", output_file)
+        
+        # Summary statistics
+        print_and_save(f"\n📊 ANALYSIS SUMMARY:", output_file)
+        print_and_save("─" * 40, output_file)
+        scores = [get_score(item) for item in analyzed_papers]
+        avg_score = sum(scores) / len(scores) if scores else 0
+        max_score = max(scores) if scores else 0
+        min_score = min(scores) if scores else 0
+        
+        print_and_save(f"   📈 Average Impact Score: {avg_score:.1f}/10", output_file)
+        print_and_save(f"   🔝 Highest Impact Score: {max_score}/10", output_file)
+        print_and_save(f"   📉 Lowest Impact Score: {min_score}/10", output_file)
+        print_and_save(f"   📄 Total Papers Analyzed: {len(papers)}", output_file)
+        
+        print_and_save("\n" + "=" * 80, output_file)
+        print_and_save("✅ Analysis Complete!", output_file)
+        print_and_save("=" * 80, output_file)
+        
+        # Also save structured data as JSON
+        json_filename = f"arxiv_analysis_{timestamp}.json"
+        json_data = {
+            "analysis_metadata": {
+                "timestamp": datetime.now().isoformat(),
+                "category": "cond-mat.str-el",
+                "total_papers_analyzed": len(papers),
+                "top_papers_count": m,
+                "analysis_version": "1.0"
+            },
+            "summary_statistics": {
+                "average_impact_score": avg_score,
+                "highest_impact_score": max_score,
+                "lowest_impact_score": min_score
+            },
+            "papers": []
+        }
+        
+        for rank, item in enumerate(analyzed_papers[:m], 1):
+            paper = item['paper']
+            analysis = item['analysis']
+            
+            # Extract structured data from analysis
+            score = get_score(item)
+            analysis_lines = analysis.split('\n')
+            summary_text = ""
+            justification_text = ""
+            
+            for line in analysis_lines:
+                if line.startswith('Summary:'):
+                    summary_text = line.replace('Summary:', '').strip()
+                elif line.startswith('Justification:'):
+                    justification_text = line.replace('Justification:', '').strip()
+            
+            # Get author data
+            authors_data = []
+            for author in paper.authors:
+                author_info = get_author_info(author.name)
+                authors_data.append({
+                    "name": author.name,
+                    "h_index": author_info.get('h_index', 'N/A'),
+                    "recent_publications_count": len(author_info.get('recent_publications', [])),
+                    "recent_publications": author_info.get('recent_publications', [])
+                })
+            
+            topics = paper.summary.split('.')[0]
+            topic_prevalence = get_topic_prevalence(topics)
+            
+            paper_data = {
+                "rank": rank,
+                "impact_score": score,
+                "title": paper.title,
+                "authors": authors_data,
+                "published": paper.published,
+                "arxiv_id": paper.id.split('/')[-1],
+                "arxiv_link": paper.link,
+                "primary_topic": topics,
+                "topic_prevalence": topic_prevalence,
+                "abstract": paper.summary,
+                "ai_analysis": {
+                    "summary": summary_text,
+                    "justification": justification_text
+                }
+            }
+            json_data["papers"].append(paper_data)
+        
+        # Save JSON file
+        with open(json_filename, 'w', encoding='utf-8') as json_file:
+            json.dump(json_data, json_file, indent=2, ensure_ascii=False)
+        
+        # Notify user about saved files
+        print(f"\n💾 Analysis saved to:")
+        print(f"   📄 Text Report: {output_filename}")
+        print(f"   📊 JSON Data: {json_filename}")
+        print(f"📁 Text file size: {os.path.getsize(output_filename)} bytes")
+        print(f"📁 JSON file size: {os.path.getsize(json_filename)} bytes")
 
 if __name__ == "__main__":
     main()
