@@ -24,6 +24,9 @@ class PaperSignals:
     published: dt.datetime
     # Required: LLM-generated keywords-based topic activity score
     topic_activity_score: float
+    # New: field classification and prior
+    field_classification: str | None = None
+    field_prior_multiplier: float = 1.0
 
 
 @dataclass
@@ -110,9 +113,10 @@ def _create_topic_summary(topic_details: dict, total_score: float) -> str:
 def compute_score_with_llm(sig: PaperSignals, title: str, abstract: str, authors: list[str], topic_details: dict = None) -> PaperScore:
     """
     Use LLM to provide structured inputs for FWCI-based scoring instead of arbitrary scores.
+    Now includes field prior adjustment.
     
     Args:
-        sig: PaperSignals containing all the metrics
+        sig: PaperSignals containing all the metrics (including field_classification and field_prior_multiplier)
         title: Paper title
         abstract: Paper abstract  
         authors: List of authors
@@ -136,6 +140,10 @@ def compute_score_with_llm(sig: PaperSignals, title: str, abstract: str, authors
     # Create curated topic summary
     topic_summary = _create_topic_summary(topic_details, sig.topic_activity_score)
     
+    # Include field classification information
+    field_info = f"Field Classification: {sig.field_classification or 'Unknown'}"
+    field_prior_info = f"Field Prior Multiplier: {sig.field_prior_multiplier:.2f} (accounts for baseline citation patterns in this field)"
+    
     prompt = f"""You are a scientific impact assessment expert. Analyze this paper and provide structured quantitative inputs for Field-Weighted Citation Impact (FWCI) calculation.
 
 DO NOT provide a final score. Instead, provide specific numerical assessments for each factor that will be used in an evidence-based citation prediction model.
@@ -149,6 +157,8 @@ Authors: {', '.join(authors[:5])}{'...' if len(authors) > 5 else ''}
 Current Metrics:
 - {author_info}
 - Venue Impact: {sig.venue_two_year_mean_citedness or 'Unknown'} (2-year mean citedness)
+- {field_info}
+- {field_prior_info}
 
 Topic Activity Analysis:
 {topic_summary}
@@ -191,6 +201,8 @@ Provide numerical assessments (0.0-1.0 scale unless specified) for these factors
    - 0.6-0.8: Good cross-field applicability
    - 0.9-1.0: Broad impact across multiple fields
 
+NOTE: The field prior multiplier of {sig.field_prior_multiplier:.2f} will be automatically applied based on the field's typical citation patterns. Focus on assessing the paper's quality within its field.
+
 Provide your assessment as:
 REASONING: [Detailed quantitative reasoning for each factor]
 NOVELTY_SCORE: [0.0-1.0]
@@ -218,9 +230,15 @@ IMPACT_BREADTH: [0.0-1.0]
         # Calculate FWCI-based score using the structured inputs
         fwci_score = _calculate_fwci_from_structured_inputs(structured_inputs, sig)
         
+        # Apply field prior multiplier
+        field_adjusted_score = fwci_score * sig.field_prior_multiplier
+        
         # Create components for transparency
         components = {
-            "fwci_score": fwci_score,
+            "fwci_score_pre_field": fwci_score,
+            "field_adjusted_score": field_adjusted_score,
+            "field_classification": sig.field_classification,
+            "field_prior_multiplier": sig.field_prior_multiplier,
             "structured_inputs": structured_inputs,
             "author_h_index": sig.author_h_index_avg or 0.0,
             "author_recent": sig.author_recent_works_avg or 0.0,
@@ -228,7 +246,7 @@ IMPACT_BREADTH: [0.0-1.0]
             "llm_reasoning": response_text
         }
         
-        return PaperScore(raw=fwci_score, components=components)
+        return PaperScore(raw=field_adjusted_score, components=components)
         
     except Exception as e:
         logger = logging.getLogger("arxiv_parser")
@@ -385,26 +403,268 @@ def _extract_score_from_llm_response(response_text: str) -> float:
 
 
 def _fallback_scoring(sig: PaperSignals) -> PaperScore:
-    """Simple fallback scoring when LLM is not available."""
+    """Simple fallback scoring when LLM is not available. Now includes field prior."""
     # Basic heuristic: combine metrics with simple weights
     author_score = (sig.author_h_index_avg or 0) * 0.1 + (sig.author_recent_works_avg or 0) * 0.1
     topic_score = min(sig.topic_activity_score * 0.01, 3.0)  # Scale down topic score
     
     base_score = author_score + topic_score
-    final_score = base_score
+    
+    # Apply field prior multiplier
+    field_adjusted_score = base_score * sig.field_prior_multiplier
     
     components = {
-        "fallback_score": final_score,
+        "fallback_score": field_adjusted_score,
+        "base_score_pre_field": base_score,
+        "field_prior_multiplier": sig.field_prior_multiplier,
+        "field_classification": sig.field_classification,
         "author_component": author_score,
         "topic_component": topic_score,
     }
     
-    return PaperScore(raw=final_score, components=components)
+    return PaperScore(raw=field_adjusted_score, components=components)
 
 
 # --- Topic activity scoring with LLM-generated keywords and log-normal projection ---
 
+def classify_field_with_llm(title: str, abstract: str, keywords: list[dict] = None) -> tuple[str, float]:
+    """
+    Use LLM to classify the paper into a condensed matter subfield and determine field prior.
+    
+    Args:
+        title: Paper title
+        abstract: Paper abstract
+        keywords: Optional list of extracted keywords with relevance scores
+    
+    Returns:
+        Tuple of (field_classification, field_prior_multiplier)
+    """
+    if not config.openai_api_key or OpenAI is None:
+        # Fallback: simple keyword-based classification
+        return _fallback_field_classification(title, abstract, keywords)
+    
+    # Prepare keywords summary if available
+    keywords_text = ""
+    if keywords:
+        keyword_names = [kw.get('keyword', '') if isinstance(kw, dict) else str(kw) for kw in keywords]
+        keywords_text = f"\nExtracted Keywords: {', '.join(keyword_names)}"
+    
+    prompt = f"""You are an expert in condensed matter physics. Classify this paper into one of the major condensed matter subfields and assess the field's citation activity level.
+
+Title: {title}
+
+Abstract: {abstract}{keywords_text}
+
+Condensed Matter Subfields:
+1. SUPERCONDUCTIVITY - High-Tc, unconventional superconductors, BCS theory, Josephson junctions
+2. MAGNETISM - Magnetic materials, spintronics, magnetic phase transitions, quantum magnetism  
+3. QUANTUM_MATERIALS - Topological insulators, Weyl semimetals, quantum spin liquids, exotic quantum phases
+4. ELECTRONIC_STRUCTURE - Band theory, DFT calculations, electronic properties, Fermi surfaces
+5. STRONGLY_CORRELATED - Heavy fermions, Mott insulators, Hubbard model, high-correlation systems
+6. PHASE_TRANSITIONS - Critical phenomena, phase diagrams, order parameters, symmetry breaking
+7. TRANSPORT - Electrical transport, thermal transport, quantum transport, conductivity
+8. OPTICAL_PROPERTIES - Spectroscopy, photonics, optical response, light-matter interaction
+9. SURFACES_INTERFACES - Surface physics, thin films, heterostructures, 2D materials
+10. COMPUTATIONAL - DFT, many-body theory, quantum Monte Carlo, theoretical modeling
+11. EXPERIMENTAL_TECHNIQUES - STM, ARPES, neutron scattering, X-ray techniques
+12. OTHER - Other condensed matter topics not clearly fitting above categories
+
+Field Citation Activity Levels (affects citation baseline expectations):
+- HIGH (1.3-1.5x): Very active fields with high visibility (superconductivity, quantum materials, 2D materials)
+- MEDIUM_HIGH (1.1-1.2x): Active fields with good visibility (magnetism, strongly correlated systems)  
+- MEDIUM (0.9-1.1x): Standard activity level (electronic structure, phase transitions, transport)
+- MEDIUM_LOW (0.8-0.9x): Specialized fields with moderate activity (optical properties, surfaces)
+- LOW (0.6-0.8x): Niche or highly technical fields (experimental techniques, some computational work)
+
+Provide your classification as:
+FIELD: [One of the subfield names above]
+ACTIVITY_LEVEL: [HIGH/MEDIUM_HIGH/MEDIUM/MEDIUM_LOW/LOW]
+MULTIPLIER: [Numerical value between 0.6-1.5 based on activity level]
+REASONING: [Brief explanation of classification and activity assessment]
+"""
+    
+    try:
+        client = OpenAI(api_key=config.openai_api_key)
+        resp = client.chat.completions.create(
+            model=config.openai_model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            max_tokens=400
+        )
+        
+        response_text = resp.choices[0].message.content.strip()
+        return _extract_field_classification_from_llm_response(response_text)
+        
+    except Exception as e:
+        logger = logging.getLogger("arxiv_parser")
+        logger.warning(f"LLM field classification failed: {e}, using fallback")
+        return _fallback_field_classification(title, abstract, keywords)
+
+
+def _extract_field_classification_from_llm_response(response_text: str) -> tuple[str, float]:
+    """Extract field classification and multiplier from LLM response."""
+    import re
+    
+    # Extract field
+    field_match = re.search(r'FIELD:\s*([A-Z_]+)', response_text)
+    field = field_match.group(1) if field_match else "OTHER"
+    
+    # Extract multiplier
+    multiplier_match = re.search(r'MULTIPLIER:\s*([0-9]+\.?[0-9]*)', response_text)
+    if multiplier_match:
+        try:
+            multiplier = float(multiplier_match.group(1))
+            multiplier = max(0.6, min(1.5, multiplier))  # Clamp to valid range
+        except ValueError:
+            multiplier = 1.0
+    else:
+        # Fallback based on activity level
+        activity_match = re.search(r'ACTIVITY_LEVEL:\s*([A-Z_]+)', response_text)
+        if activity_match:
+            activity = activity_match.group(1)
+            multiplier = {
+                'HIGH': 1.4,
+                'MEDIUM_HIGH': 1.15,
+                'MEDIUM': 1.0,
+                'MEDIUM_LOW': 0.85,
+                'LOW': 0.7
+            }.get(activity, 1.0)
+        else:
+            multiplier = 1.0
+    
+    return field, multiplier
+
+
+def _fallback_field_classification(title: str, abstract: str, keywords: list[dict] = None) -> tuple[str, float]:
+    """Simple keyword-based field classification fallback."""
+    text = (title + " " + abstract).lower()
+    
+    # Add keywords to text if available
+    if keywords:
+        keyword_names = [kw.get('keyword', '') if isinstance(kw, dict) else str(kw) for kw in keywords]
+        text += " " + " ".join(keyword_names).lower()
+    
+    # Field classification based on keywords
+    field_keywords = {
+        'SUPERCONDUCTIVITY': ['superconductor', 'superconducting', 'cooper pair', 'josephson', 'meissner', 'bcs', 'tc', 'critical temperature'],
+        'MAGNETISM': ['magnetic', 'magnetism', 'spin', 'ferromagnetic', 'antiferromagnetic', 'heisenberg', 'ising', 'skyrmion'],
+        'QUANTUM_MATERIALS': ['topological', 'weyl', 'dirac', 'quantum spin liquid', 'quantum hall', 'chern', 'majorana'],
+        'ELECTRONIC_STRUCTURE': ['band structure', 'density functional', 'dft', 'electronic structure', 'fermi surface', 'brillouin'],
+        'STRONGLY_CORRELATED': ['hubbard', 'mott', 'anderson', 'heavy fermion', 'correlation', 'strongly correlated'],
+        'PHASE_TRANSITIONS': ['phase transition', 'critical point', 'order parameter', 'symmetry breaking', 'renormalization'],
+        'TRANSPORT': ['conductivity', 'resistivity', 'mobility', 'transport', 'hall effect', 'thermoelectric'],
+        'OPTICAL_PROPERTIES': ['optical', 'photonic', 'spectroscopy', 'raman', 'infrared', 'photoluminescence'],
+        'SURFACES_INTERFACES': ['surface', 'interface', 'thin film', 'heterostructure', '2d material', 'graphene'],
+        'COMPUTATIONAL': ['monte carlo', 'calculation', 'simulation', 'theoretical', 'model', 'numerical'],
+        'EXPERIMENTAL_TECHNIQUES': ['stm', 'arpes', 'neutron scattering', 'x-ray', 'microscopy', 'measurement']
+    }
+    
+    # Count keyword matches for each field
+    field_scores = {}
+    for field, keywords_list in field_keywords.items():
+        score = sum(1 for kw in keywords_list if kw in text)
+        field_scores[field] = score
+    
+    # Select field with highest score
+    best_field = max(field_scores, key=field_scores.get) if field_scores else "OTHER"
+    max_score = field_scores.get(best_field, 0)
+    
+    if max_score == 0:
+        best_field = "OTHER"
+    
+    # Assign multipliers based on typical field activity
+    field_multipliers = {
+        'SUPERCONDUCTIVITY': 1.4,
+        'QUANTUM_MATERIALS': 1.3,
+        'MAGNETISM': 1.2,
+        'STRONGLY_CORRELATED': 1.15,
+        'ELECTRONIC_STRUCTURE': 1.0,
+        'PHASE_TRANSITIONS': 1.0,
+        'TRANSPORT': 0.95,
+        'SURFACES_INTERFACES': 0.9,
+        'OPTICAL_PROPERTIES': 0.85,
+        'COMPUTATIONAL': 0.8,
+        'EXPERIMENTAL_TECHNIQUES': 0.75,
+        'OTHER': 1.0
+    }
+    
+    multiplier = field_multipliers.get(best_field, 1.0)
+    return best_field, multiplier
+
+
 def extract_keywords_with_llm(title: str, abstract: str, num_keywords: int = 5) -> list[dict]:
+    """Use LLM to extract keywords with relevance scores for topic search.
+    
+    Returns:
+        List of dicts with 'keyword' and 'relevance' (0.0-1.0) keys
+    """
+    if not config.openai_api_key or OpenAI is None:
+        # Fallback to basic keyword extraction from title/abstract
+        logger = logging.getLogger("arxiv_parser")
+        logger.warning("OpenAI not configured; using basic keyword extraction")
+        # Simple fallback: extract capitalized words and common physics terms
+        words = (title + " " + abstract).split()
+        keywords = []
+        physics_terms = ["quantum", "condensed", "matter", "magnetic", "electronic", "phase", "transition", "superconducting"]
+        for word in words:
+            clean_word = word.strip(".,;:()[]").lower()
+            if (word[0].isupper() and len(word) > 3) or clean_word in physics_terms:
+                if clean_word not in [kw['keyword'] for kw in keywords]:
+                    keywords.append({'keyword': clean_word, 'relevance': 0.7})  # Default relevance
+                if len(keywords) >= num_keywords:
+                    break
+        return keywords[:num_keywords]
+
+    client = OpenAI(api_key=config.openai_api_key)
+    prompt = (
+        f"Extract {num_keywords} most relevant scientific keywords for this paper that would be useful "
+        f"for finding similar research articles. Focus on specific technical terms, materials, methods, "
+        f"or phenomena.\n\n"
+        f"For each keyword, also provide a relevance score from 0.0 to 1.0 indicating how central "
+        f"the keyword is to the paper's main contribution:\n"
+        f"- 1.0: Core concept, central to the paper's main findings\n"
+        f"- 0.8: Important related concept, directly relevant\n"
+        f"- 0.6: Supporting concept, somewhat relevant\n"
+        f"- 0.4: Background concept, tangentially related\n"
+        f"- 0.2: Broad field concept, very general relevance\n\n"
+        f"Format each line as: keyword_phrase | relevance_score\n"
+        f"Example: quantum entanglement | 0.9\n\n"
+        f"Title: {title}\n\nAbstract: {abstract}"
+    )
+    
+    try:
+        resp = client.chat.completions.create(
+            model=config.openai_model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            max_tokens=200
+        )
+        keywords_text = resp.choices[0].message.content.strip()
+        
+        keywords = []
+        for line in keywords_text.split('\n'):
+            if '|' in line:
+                parts = line.split('|')
+                if len(parts) >= 2:
+                    keyword = parts[0].strip().lower()
+                    try:
+                        relevance = float(parts[1].strip())
+                        relevance = max(0.0, min(1.0, relevance))  # Clamp to [0,1]
+                        keywords.append({'keyword': keyword, 'relevance': relevance})
+                    except ValueError:
+                        keywords.append({'keyword': keyword, 'relevance': 0.5})  # Default if parsing fails
+            elif line.strip():
+                # Fallback: treat as keyword with default relevance
+                keywords.append({'keyword': line.strip().lower(), 'relevance': 0.5})
+        
+        return keywords[:num_keywords]
+    except Exception as e:
+        logger = logging.getLogger("arxiv_parser")
+        logger.warning("LLM keyword extraction failed: %s", e)
+        return []
+
+
+# --- Topic activity scoring with LLM-generated keywords and log-normal projection ---
     """Use LLM to extract keywords with relevance scores for topic search.
     
     Returns:
@@ -817,16 +1077,18 @@ def compute_topic_activity_score(works: Iterable[dict]) -> float:
 
 
 def explain_score(sig: PaperSignals, score_result: PaperScore, topic_details: dict = None) -> dict:
-    """Return explanation of the improved LLM-based score calculation for templating.
+    """Return explanation of the improved LLM-based score calculation with field prior for templating.
 
     Structure:
     {
-      'signals': {... raw values ...},
+      'signals': {... raw values including field info ...},
       'components': {... score components ...},
       'final_score': float,
       'llm_reasoning': str (if available),
       'structured_inputs': dict (if available),
-      'topic_activity_breakdown': dict (if available)
+      'topic_activity_breakdown': dict (if available),
+      'field_classification': str (if available),
+      'field_prior_multiplier': float
     }
     """
     
@@ -837,10 +1099,14 @@ def explain_score(sig: PaperSignals, score_result: PaperScore, topic_details: di
             "venue_two_year_mean_citedness": sig.venue_two_year_mean_citedness,
             "published": sig.published.isoformat(),
             "topic_activity_score": sig.topic_activity_score,
-            "scoring_method": "llm_structured_fwci_based",
+            "field_classification": sig.field_classification,
+            "field_prior_multiplier": sig.field_prior_multiplier,
+            "scoring_method": "llm_structured_fwci_with_field_prior",
         },
         "components": score_result.components,
         "final_score": score_result.raw,
+        "field_classification": sig.field_classification,
+        "field_prior_multiplier": sig.field_prior_multiplier,
     }
     
     # Include LLM reasoning if available
@@ -883,6 +1149,7 @@ def compute_score(sig: PaperSignals, title: str = "", abstract: str = "", author
 def compute_paper_topic_activity_score(title: str, abstract: str, num_keywords: int = 5, max_works_per_keyword: int = 50) -> tuple[float, dict]:
     """
     Main function to compute topic activity score for a paper using LLM-generated keywords with relevance scores.
+    Now also includes field classification.
     
     Args:
         title: Paper title
@@ -891,16 +1158,26 @@ def compute_paper_topic_activity_score(title: str, abstract: str, num_keywords: 
         max_works_per_keyword: Maximum works to analyze per keyword
     
     Returns:
-        Tuple of (topic activity score, details dict with keywords and breakdown)
+        Tuple of (topic activity score, details dict with keywords, breakdown, and field info)
     """
     # Step 1: Extract keywords with relevance scores using LLM
     keywords_with_relevance = extract_keywords_with_llm(title, abstract, num_keywords)
     
     if not keywords_with_relevance:
         logging.getLogger("arxiv_parser").warning("No keywords extracted, returning zero topic score")
-        return 0.0, {"keywords": [], "breakdown": []}
+        # Still try to classify field even without keywords
+        field_classification, field_prior = classify_field_with_llm(title, abstract, [])
+        return 0.0, {
+            "keywords": [], 
+            "breakdown": [],
+            "field_classification": field_classification,
+            "field_prior_multiplier": field_prior
+        }
     
-    # Step 2: Compute activity score using these keywords and capture details
+    # Step 2: Classify the field using keywords and content
+    field_classification, field_prior = classify_field_with_llm(title, abstract, keywords_with_relevance)
+    
+    # Step 3: Compute activity score using these keywords and capture details
     score, details = compute_topic_activity_score_with_keywords_detailed(keywords_with_relevance, max_works_per_keyword)
     
     # Extract just keyword names for backward compatibility in the summary
@@ -910,5 +1187,7 @@ def compute_paper_topic_activity_score(title: str, abstract: str, num_keywords: 
         "keywords": keyword_names,
         "keywords_with_relevance": keywords_with_relevance,  # Include relevance data
         "breakdown": details,
-        "total_score": score
+        "total_score": score,
+        "field_classification": field_classification,
+        "field_prior_multiplier": field_prior
     }

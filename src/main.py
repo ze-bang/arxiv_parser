@@ -173,6 +173,8 @@ def run(top_m: int, send_mail: bool, dry_run: bool, date: dt.date | None) -> int
             venue_two_year_mean_citedness=venue_metric,
             published=e.published,
             topic_activity_score=topic_activity_score,
+            field_classification=topic_details.get("field_classification"),
+            field_prior_multiplier=topic_details.get("field_prior_multiplier", 1.0),
         )
         score = compute_score(sig, e.title, e.summary, e.authors, topic_details)
         expl = explain_score(sig, score, topic_details)
@@ -191,6 +193,8 @@ def run(top_m: int, send_mail: bool, dry_run: bool, date: dt.date | None) -> int
                 "abstract": e.summary,
                 "explanation": expl,
                 "topic_activity_score": topic_activity_score,
+                "field_classification": topic_details.get("field_classification"),
+                "field_prior_multiplier": topic_details.get("field_prior_multiplier", 1.0),
             }
         )
 
