@@ -142,13 +142,15 @@ def run(top_m: int, send_mail: bool, dry_run: bool, date: dt.date | None) -> int
 
         # Topic activity score using LLM-generated keywords
         topic_activity_score = 0.0
+        topic_details = {}
         try:
             # Use new LLM-based keyword extraction and scoring
-            topic_activity_score = compute_paper_topic_activity_score(e.title, e.abstract)
+            topic_activity_score, topic_details = compute_paper_topic_activity_score(e.title, e.summary)
             logger.debug("[Score] Topic activity score=%.3f (LLM keywords)", topic_activity_score)
         except Exception as ex:
             logger.warning("[Score] Topic activity scoring failed: %s", ex)
             topic_activity_score = 0.0
+            topic_details = {}
 
         # Venue metrics if possible
         venue_metric = None
@@ -172,8 +174,8 @@ def run(top_m: int, send_mail: bool, dry_run: bool, date: dt.date | None) -> int
             published=e.published,
             topic_activity_score=topic_activity_score,
         )
-        score = compute_score(sig)
-        expl = explain_score(sig)
+        score = compute_score(sig, e.title, e.summary, e.authors, topic_details)
+        expl = explain_score(sig, score)
         # Always include topic activity score since it's now required
         expl["topic_activity_score"] = topic_activity_score
 

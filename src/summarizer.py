@@ -23,9 +23,21 @@ def summarize_with_llm(title: str, abstract: str, score_components: dict[str, fl
 
     m = model or config.openai_model
     client = OpenAI(api_key=config.openai_api_key)
-    components_str = ", ".join(f"{k}: {v:.2f}" for k, v in score_components.items())
+    
+    # Filter numeric components for display and include key metrics
+    numeric_components = {}
+    for k, v in score_components.items():
+        if isinstance(v, (int, float)) and k != 'llm_reasoning':
+            numeric_components[k] = v
+    
+    components_str = ", ".join(f"{k}: {v:.2f}" for k, v in numeric_components.items())
+    
+    # Include LLM reasoning if available
+    llm_reasoning = score_components.get('llm_reasoning', '')
+    reasoning_snippet = f"\n\nLLM Assessment: {llm_reasoning[:200]}..." if llm_reasoning else ""
+    
     prompt = (
-        f"Title: {title}\n\nAbstract: {abstract}\n\nScore components: {components_str}.\n"
+        f"Title: {title}\n\nAbstract: {abstract}\n\nScore components: {components_str}.{reasoning_snippet}\n"
         "Write 4-6 informative sentences."
     )
     try:

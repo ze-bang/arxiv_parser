@@ -49,37 +49,19 @@
             <div><strong>Raw signals</strong>:
               h_index_avg={{ it.explanation.signals.author_h_index_avg | default('None') }},
               recent_works_avg={{ it.explanation.signals.author_recent_works_avg | default('None') }},
-              topic_high_cited_3y={{ it.explanation.signals.topic_high_cited_3y | default('None') }},
+              topic_activity_score={{ '%.2f'|format(it.explanation.signals.topic_activity_score) }},
               venue_2y_mean_citedness={{ it.explanation.signals.venue_two_year_mean_citedness | default('None') }},
-              published={{ it.explanation.signals.published }}
+              published={{ it.explanation.signals.published }},
+              scoring_method={{ it.explanation.signals.scoring_method }}
             </div>
-            <div><strong>Priors</strong> (mean, std):
-              h_index={{ it.explanation.priors.h_index }},
-              works_5y={{ it.explanation.priors.works_5y }},
-              topic_high_cited_3y={{ it.explanation.priors.topic_high_cited_3y }},
-              venue_2y_mean_citedness={{ it.explanation.priors.venue_2y_mean_citedness }}
+            <div><strong>LLM Score Components</strong>:
+              llm_score={{ '%.2f'|format(it.explanation.components.llm_score | default(0)) }},
+              time_decay={{ '%.3f'|format(it.explanation.components.time_decay | default(1)) }},
+              final_score={{ '%.2f'|format(it.explanation.final_score) }}
             </div>
-            <div><strong>Z-scores</strong>:
-              author_h_index={{ '%.2f'|format(it.explanation.z.author_h_index) }},
-              author_recent={{ '%.2f'|format(it.explanation.z.author_recent) }},
-              topic={{ '%.2f'|format(it.explanation.z.topic) }},
-              venue={{ '%.2f'|format(it.explanation.z.venue) }}
-            </div>
-            <div><strong>Weights</strong>:
-              author_h_index={{ it.explanation.weights.author_h_index }},
-              author_recent={{ it.explanation.weights.author_recent }},
-              topic={{ it.explanation.weights.topic }},
-              venue={{ it.explanation.weights.venue }}
-            </div>
-            <div><strong>Contributions</strong> (z*weight):
-              author_h_index={{ '%.2f'|format(it.explanation.contributions.author_h_index) }},
-              author_recent={{ '%.2f'|format(it.explanation.contributions.author_recent) }},
-              topic={{ '%.2f'|format(it.explanation.contributions.topic) }},
-              venue={{ '%.2f'|format(it.explanation.contributions.venue) }}
-            </div>
-            <div><strong>Base sum</strong>: {{ '%.2f'|format(it.explanation.base_sum) }}</div>
-            <div><strong>Time decay</strong>: {{ '%.3f'|format(it.explanation.time_decay) }}</div>
-            <div><strong>Final score</strong>: {{ '%.2f'|format(it.explanation.final_score) }}</div>
+            {% if it.explanation.llm_reasoning %}
+            <div><strong>LLM Assessment</strong>: {{ it.explanation.llm_reasoning[:300] }}{% if it.explanation.llm_reasoning|length > 300 %}...{% endif %}</div>
+            {% endif %}
           </div>
         </details>
       </div>

@@ -49,63 +49,180 @@ def time_decay(published: dt.datetime, now: Optional[dt.datetime] = None) -> flo
     return math.exp(-age_days / TAU_DAYS)
 
 
-def z(x: Optional[float], mean: float, std: float, cap_low: float | None = None, cap_high: float | None = None) -> float:
-    if x is None:
-        return 0.0
-    if std <= 0:
-        v = x - mean
-    else:
-        v = (x - mean) / std
-    if cap_low is not None:
-        v = max(v, cap_low)
-    if cap_high is not None:
-        v = min(v, cap_high)
-    return v
+# LLM-based scoring system - no more priors or fixed weights
 
 
-DEFAULT_STATS = {
-    "h_index": (20.0, 15.0),
-    "works_5y": (10.0, 8.0),
-    "venue_2y_mean_citedness": (1.0, 0.8),
-    # For activity-based topic score we use log1p transformation; priors below are for log1p(activity)
-    "topic_activity_log1p": (5.0, 2.0),  # Updated for more sophisticated LLM-based scoring
-}
+def _create_topic_summary(topic_details: dict, total_score: float) -> str:
+    """Create a curated summary of topic score calculation for LLM."""
+    if not topic_details or "keywords" not in topic_details:
+        return f"Topic activity score: {total_score:.2f} (no detailed breakdown available)"
+    
+    keywords = topic_details.get("keywords", [])
+    breakdown = topic_details.get("breakdown", [])
+    
+    summary_parts = [
+        f"Topic activity score: {total_score:.2f}",
+        f"Keywords analyzed: {', '.join(keywords)}"
+    ]
+    
+    if breakdown:
+        summary_parts.append("\nRecent publications analysis:")
+        for item in breakdown[:3]:  # Show top 3 keywords for brevity
+            keyword = item.get("keyword", "unknown")
+            num_works = item.get("num_works", 0)
+            contribution = item.get("total_contribution", 0)
+            
+            summary_parts.append(f"- '{keyword}': {num_works} recent papers, score contribution: {contribution:.1f}")
+            
+            # Show top publications for this keyword
+            top_pubs = item.get("top_publications", [])
+            if top_pubs:
+                venues = {}
+                years = {}
+                for pub in top_pubs[:3]:  # Top 3 publications
+                    venue = pub.get("venue", "Unknown")
+                    year = pub.get("year", "Unknown")
+                    venues[venue] = venues.get(venue, 0) + 1
+                    years[str(year)] = years.get(str(year), 0) + 1
+                
+                venue_summary = ", ".join([f"{v} ({c})" for v, c in sorted(venues.items(), key=lambda x: x[1], reverse=True)])
+                year_summary = ", ".join([f"{y} ({c})" for y, c in sorted(years.items(), reverse=True)])
+                summary_parts.append(f"  Top venues: {venue_summary}")
+                summary_parts.append(f"  Publication years: {year_summary}")
+    
+    return "\n".join(summary_parts)
 
 
-# Public weights used for combining component z-scores
-WEIGHTS: dict[str, float] = {
-    "author_h_index": 0.35,
-    "author_recent": 0.25,
-    "topic": 0.25,
-    "venue": 0.15,
-}
+def compute_score_with_llm(sig: PaperSignals, title: str, abstract: str, authors: list[str], topic_details: dict = None) -> PaperScore:
+    """
+    Use LLM to determine the final score based on all collected information.
+    
+    Args:
+        sig: PaperSignals containing all the metrics
+        title: Paper title
+        abstract: Paper abstract  
+        authors: List of authors
+        topic_details: Detailed breakdown of topic scoring
+    
+    Returns:
+        PaperScore with LLM-determined score and components
+    """
+    if not config.openai_api_key or OpenAI is None:
+        # Fallback: simple heuristic scoring if LLM not available
+        logger = logging.getLogger("arxiv_parser")
+        logger.warning("OpenAI not configured; using fallback scoring")
+        return _fallback_scoring(sig)
+    
+    if topic_details is None:
+        topic_details = {}
+    
+    # Prepare information for LLM
+    author_info = f"Average H-index: {sig.author_h_index_avg or 'Unknown'}, Recent works: {sig.author_recent_works_avg or 'Unknown'}"
+    
+    # Create curated topic summary
+    topic_summary = _create_topic_summary(topic_details, sig.topic_activity_score)
+    
+    prompt = f"""You are a scientific impact assessment expert. Evaluate this paper's potential impact and assign a score from 0.0 to 10.0.
+
+Title: {title}
+
+Abstract: {abstract}
+
+Authors: {', '.join(authors[:5])}{'...' if len(authors) > 5 else ''}
+
+Metrics:
+- {author_info}
+
+Topic Analysis:
+{topic_summary}
+
+Consider:
+1. Novelty and significance of the research
+2. Author reputation and track record  
+3. Topic activity and relevance in current research landscape based on the detailed analysis above
+
+Provide your reasoning and a final score. Format your response as:
+REASONING: [Your detailed analysis]
+SCORE: [numerical score from 0.0 to 10.0]
+"""
+    
+    try:
+        client = OpenAI(api_key=config.openai_api_key)
+        resp = client.chat.completions.create(
+            model=config.openai_model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            max_tokens=500
+        )
+        
+        response_text = resp.choices[0].message.content.strip()
+        
+        # Extract score from response
+        score = _extract_score_from_llm_response(response_text)
+        
+        # Create components for transparency
+        components = {
+            "llm_score": score,
+            "author_h_index": sig.author_h_index_avg or 0.0,
+            "author_recent": sig.author_recent_works_avg or 0.0,
+            "topic_activity": sig.topic_activity_score,
+            "llm_reasoning": response_text
+        }
+        
+        # Use the LLM score directly (no additional time decay)
+        final_score = score
+        
+        return PaperScore(raw=final_score, components=components)
+        
+    except Exception as e:
+        logger = logging.getLogger("arxiv_parser")
+        logger.warning(f"LLM scoring failed: {e}, using fallback")
+        return _fallback_scoring(sig)
 
 
-def compute_score(sig: PaperSignals) -> PaperScore:
-    # Normalize components with rough priors, then weighted sum
-    h_m, h_s = DEFAULT_STATS["h_index"]
-    w_m, w_s = DEFAULT_STATS["works_5y"]
-    # Use only the LLM-based keyword topic activity score
-    t_m, t_s = DEFAULT_STATS["topic_activity_log1p"]
-    topic_signal = math.log1p(max(sig.topic_activity_score, 0.0))
-    v_m, v_s = DEFAULT_STATS["venue_2y_mean_citedness"]
+def _extract_score_from_llm_response(response_text: str) -> float:
+    """Extract numerical score from LLM response."""
+    import re
+    
+    # Look for "SCORE: X.X" pattern
+    score_match = re.search(r'SCORE:\s*([0-9]+\.?[0-9]*)', response_text)
+    if score_match:
+        try:
+            score = float(score_match.group(1))
+            return max(0.0, min(10.0, score))  # Clamp to valid range
+        except ValueError:
+            pass
+    
+    # Fallback: look for any number in the response that could be a score
+    numbers = re.findall(r'\b([0-9]+\.?[0-9]*)\b', response_text)
+    for num_str in numbers:
+        try:
+            num = float(num_str)
+            if 0.0 <= num <= 10.0:
+                return num
+        except ValueError:
+            continue
+    
+    # Default fallback score
+    return 5.0
 
-    comps = {
-        "author_h_index": z(sig.author_h_index_avg, h_m, h_s, -2, 4),
-        "author_recent": z(sig.author_recent_works_avg, w_m, w_s, -2, 4),
-        "topic": z(topic_signal, t_m, t_s, -2, 4),
-        "venue": z(sig.venue_two_year_mean_citedness, v_m, v_s, -2, 4),
+
+def _fallback_scoring(sig: PaperSignals) -> PaperScore:
+    """Simple fallback scoring when LLM is not available."""
+    # Basic heuristic: combine metrics with simple weights
+    author_score = (sig.author_h_index_avg or 0) * 0.1 + (sig.author_recent_works_avg or 0) * 0.1
+    topic_score = min(sig.topic_activity_score * 0.01, 3.0)  # Scale down topic score
+    
+    base_score = author_score + topic_score
+    final_score = base_score
+    
+    components = {
+        "fallback_score": final_score,
+        "author_component": author_score,
+        "topic_component": topic_score,
     }
-
-    # Weights can be tuned
-    weights = WEIGHTS
-
-    base = sum(comps[k] * w for k, w in weights.items())
-    decay = time_decay(sig.published)
-    score = base * decay
-    comps["time_decay"] = decay
-
-    return PaperScore(raw=score, components=comps)
+    
+    return PaperScore(raw=final_score, components=components)
 
 
 # --- Topic activity scoring with LLM-generated keywords and log-normal projection ---
@@ -155,7 +272,8 @@ def extract_keywords_with_llm(title: str, abstract: str, num_keywords: int = 5) 
 
 def log_normal_projected_citations(journal_impact_factor: float, years_since_publication: float) -> float:
     """
-    Generate projected total citations using log-normal distribution.
+    DEPRECATED: Simple log-normal projection (kept for backwards compatibility).
+    Use get_improved_citation_prediction() from citation_models.py for better accuracy.
     
     Args:
         journal_impact_factor: The impact factor of the journal (mean of the distribution)
@@ -186,7 +304,34 @@ def log_normal_projected_citations(journal_impact_factor: float, years_since_pub
 
 def projected_citations_for_work(work: dict) -> float:
     """
-    Calculate projected citations for a work based on its journal's impact factor.
+    Calculate projected citations for a work using configurable prediction methods.
+    
+    Uses the global citation prediction configuration to determine which method to use.
+    Supports legacy log-normal, improved evidence-based models, or auto-selection.
+    
+    Args:
+        work: OpenAlex work dict containing host_venue and publication info
+    
+    Returns:
+        Projected citations count
+    """
+    try:
+        from .citation_config import get_citation_prediction
+        return get_citation_prediction(work)
+    except ImportError:
+        # Fallback to legacy method if citation_config not available
+        logger = logging.getLogger("arxiv_parser")
+        logger.warning("Citation config not available, using legacy method")
+        return _legacy_projected_citations_for_work(work)
+    except Exception as e:
+        logger = logging.getLogger("arxiv_parser")
+        logger.warning(f"Citation prediction failed: {e}, using legacy method")
+        return _legacy_projected_citations_for_work(work)
+
+
+def _legacy_projected_citations_for_work(work: dict) -> float:
+    """
+    Legacy citation prediction method (kept for backwards compatibility).
     
     Args:
         work: OpenAlex work dict containing host_venue and publication info
@@ -220,6 +365,86 @@ def projected_citations_for_work(work: dict) -> float:
     years_since = max(0.1, (now - pub_date).days / 365.25)
     
     return log_normal_projected_citations(impact_factor, years_since)
+
+
+def compute_topic_activity_score_with_keywords_detailed(keywords: list[str], max_works_per_keyword: int = 50) -> tuple[float, list]:
+    """
+    Compute topic activity score using LLM-generated keywords and return detailed breakdown.
+    
+    For each keyword:
+    1. Search for recent articles containing the keyword
+    2. For each article found, calculate: projected_citations * time_decay
+    3. Sum all contributions and track details
+    
+    Args:
+        keywords: List of relevant keywords from LLM
+        max_works_per_keyword: Maximum number of works to consider per keyword
+    
+    Returns:
+        Tuple of (total score, list of keyword details)
+    """
+    from . import openalex_client
+    
+    total_score = 0.0
+    keyword_details = []
+    logger = logging.getLogger("arxiv_parser")
+    
+    # Search from 3 years ago to capture recent activity
+    try:
+        UTC = dt.UTC
+    except AttributeError:
+        from datetime import timezone as _tz
+        UTC = _tz.utc
+    
+    from_date = (dt.datetime.now(UTC) - dt.timedelta(days=3*365)).strftime("%Y-%m-%d")
+    
+    for keyword in keywords:
+        try:
+            # Search for works containing this keyword
+            works = search_works_by_keyword(keyword, from_date, max_works_per_keyword)
+            logger.debug(f"Found {len(works)} works for keyword '{keyword}'")
+            
+            keyword_score = 0.0
+            publications_info = []
+            
+            for work in works:
+                projected_cites = projected_citations_for_work(work)
+                pub_datetime = publication_datetime_from_work(work)
+                decay = time_decay(pub_datetime)
+                contribution = projected_cites * decay
+                
+                # Capture publication details
+                venue_name = work.get("host_venue", {}).get("display_name", "Unknown venue")
+                pub_year = pub_datetime.year
+                publications_info.append({
+                    "venue": venue_name,
+                    "year": pub_year,
+                    "projected_citations": projected_cites,
+                    "time_decay": decay,
+                    "contribution": contribution
+                })
+                
+                keyword_score += contribution
+                total_score += contribution
+            
+            keyword_details.append({
+                "keyword": keyword,
+                "num_works": len(works),
+                "total_contribution": keyword_score,
+                "top_publications": publications_info[:5]  # Keep top 5 for brevity
+            })
+                
+        except Exception as e:
+            logger.warning(f"Error processing keyword '{keyword}': {e}")
+            keyword_details.append({
+                "keyword": keyword,
+                "num_works": 0,
+                "total_contribution": 0.0,
+                "error": str(e)
+            })
+            continue
+    
+    return total_score, keyword_details
 
 
 def compute_topic_activity_score_with_keywords(keywords: list[str], max_works_per_keyword: int = 50) -> float:
@@ -339,61 +564,61 @@ def compute_topic_activity_score(works: Iterable[dict]) -> float:
     return total
 
 
-def explain_score(sig: PaperSignals) -> dict:
-    """Return a pedantic breakdown of the score calculation for templating.
+def explain_score(sig: PaperSignals, score_result: PaperScore) -> dict:
+    """Return explanation of the LLM-based score calculation for templating.
 
     Structure:
     {
       'signals': {... raw values ...},
-      'priors': DEFAULT_STATS,
-      'z': {... z-scores per component ...},
-      'weights': WEIGHTS,
-      'contributions': {... z * weight ...},
-      'base_sum': float,
-      'time_decay': float,
+      'components': {... score components ...},
       'final_score': float,
+      'llm_reasoning': str (if available)
     }
     """
-    h_m, h_s = DEFAULT_STATS["h_index"]
-    w_m, w_s = DEFAULT_STATS["works_5y"]
-    # Use only the LLM-based keyword topic activity score
-    t_m, t_s = DEFAULT_STATS["topic_activity_log1p"]
-    topic_signal = math.log1p(max(sig.topic_activity_score, 0.0))
-    v_m, v_s = DEFAULT_STATS["venue_2y_mean_citedness"]
-
-    z_components = {
-        "author_h_index": z(sig.author_h_index_avg, h_m, h_s, -2, 4),
-        "author_recent": z(sig.author_recent_works_avg, w_m, w_s, -2, 4),
-        "topic": z(topic_signal, t_m, t_s, -2, 4),
-        "venue": z(sig.venue_two_year_mean_citedness, v_m, v_s, -2, 4),
-    }
-
-    contributions = {k: z_components[k] * WEIGHTS[k] for k in WEIGHTS.keys()}
-    base_sum = sum(contributions.values())
-    decay = time_decay(sig.published)
-    final = base_sum * decay
-
-    return {
+    
+    explanation = {
         "signals": {
             "author_h_index_avg": sig.author_h_index_avg,
             "author_recent_works_avg": sig.author_recent_works_avg,
             "venue_two_year_mean_citedness": sig.venue_two_year_mean_citedness,
             "published": sig.published.isoformat(),
             "topic_activity_score": sig.topic_activity_score,
-            "topic_source": "llm_keywords",
-            "topic_signal_used": topic_signal,
+            "scoring_method": "llm_based",
         },
-        "priors": DEFAULT_STATS,
-        "z": z_components,
-        "weights": WEIGHTS,
-        "contributions": contributions,
-        "base_sum": base_sum,
-        "time_decay": decay,
-        "final_score": final,
+        "components": score_result.components,
+        "final_score": score_result.raw,
     }
+    
+    # Include LLM reasoning if available
+    if "llm_reasoning" in score_result.components:
+        explanation["llm_reasoning"] = score_result.components["llm_reasoning"]
+    
+    return explanation
 
 
-def compute_paper_topic_activity_score(title: str, abstract: str, num_keywords: int = 5, max_works_per_keyword: int = 50) -> float:
+def compute_score(sig: PaperSignals, title: str = "", abstract: str = "", authors: list[str] = None, topic_details: dict = None) -> PaperScore:
+    """
+    Compatibility wrapper for the new LLM-based scoring system.
+    
+    Args:
+        sig: PaperSignals containing metrics
+        title: Paper title (optional for backwards compatibility)
+        abstract: Paper abstract (optional for backwards compatibility)  
+        authors: List of authors (optional for backwards compatibility)
+        topic_details: Topic calculation details (optional)
+    
+    Returns:
+        PaperScore with LLM-determined score
+    """
+    if authors is None:
+        authors = []
+    if topic_details is None:
+        topic_details = {}
+    
+    return compute_score_with_llm(sig, title, abstract, authors, topic_details)
+
+
+def compute_paper_topic_activity_score(title: str, abstract: str, num_keywords: int = 5, max_works_per_keyword: int = 50) -> tuple[float, dict]:
     """
     Main function to compute topic activity score for a paper using LLM-generated keywords.
     
@@ -404,14 +629,20 @@ def compute_paper_topic_activity_score(title: str, abstract: str, num_keywords: 
         max_works_per_keyword: Maximum works to analyze per keyword
     
     Returns:
-        Topic activity score based on projected citations and time decay
+        Tuple of (topic activity score, details dict with keywords and breakdown)
     """
     # Step 1: Extract keywords using LLM
     keywords = extract_keywords_with_llm(title, abstract, num_keywords)
     
     if not keywords:
         logging.getLogger("arxiv_parser").warning("No keywords extracted, returning zero topic score")
-        return 0.0
+        return 0.0, {"keywords": [], "breakdown": []}
     
-    # Step 2: Compute activity score using these keywords
-    return compute_topic_activity_score_with_keywords(keywords, max_works_per_keyword)
+    # Step 2: Compute activity score using these keywords and capture details
+    score, details = compute_topic_activity_score_with_keywords_detailed(keywords, max_works_per_keyword)
+    
+    return score, {
+        "keywords": keywords,
+        "breakdown": details,
+        "total_score": score
+    }
