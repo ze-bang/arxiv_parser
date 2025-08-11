@@ -15,6 +15,13 @@
   </head>
   <body>
     <h2>cond-mat.str-el Daily Digest - {{ date }}</h2>
+    
+    <div style="background:#f8f9fa; padding:10px; margin-bottom:20px; border-left:4px solid #0055cc; font-size:13px;">
+      <strong>Scoring Methodology:</strong> Papers are ranked using quantitative impact prediction based on Field-Weighted Citation Impact (FWCI) methodology. 
+      Scores integrate author H-index metrics, recent publication patterns, topic activity analysis from keyword-based research trends, 
+      and venue quality indicators. LLM assessment provides comprehensive reasoning without truncation for full transparency.
+    </div>
+    
     {% if items|length == 0 %}
       <p>No new submissions today.</p>
     {% endif %}
@@ -34,33 +41,80 @@
           <summary style="cursor:pointer;">Scoring breakdown</summary>
           <div style="font-size:12px; color:#333; margin-top:6px;">
             {% if it.topic_activity_score is not none %}
-              <div><strong>Topic activity score (new)</strong>: {{ '%.2f'|format(it.topic_activity_score) }}</div>
+              <div><strong>Topic Activity Score</strong>: {{ '%.2f'|format(it.topic_activity_score) }}</div>
               {% if it.explanation.topic_activity_breakdown %}
-                <div>From date: {{ it.explanation.topic_activity_breakdown.from_date }}</div>
-                <div>Per-concept contributions:</div>
-                <ul>
-                  {% for c in it.explanation.topic_activity_breakdown.concepts %}
-                    <li>{{ c.name or c.id }} — weight={{ '%.2f'|format(c.weight) }}, works={{ c.works }}, activity={{ '%.2f'|format(c.activity) }}</li>
-                  {% endfor %}
-                </ul>
-                <div><em>Weighted sum</em>: {{ '%.2f'|format(it.explanation.topic_activity_breakdown.weighted_sum) }}</div>
+                <div><strong>Topic Analysis</strong>:</div>
+                <div style="margin-left:10px;">
+                  {% if it.explanation.topic_activity_breakdown.keywords_with_relevance %}
+                    <div>Keywords with relevance scores:</div>
+                    <ul style="margin-left:15px;">
+                    {% for kw_data in it.explanation.topic_activity_breakdown.keywords_with_relevance %}
+                      {% if kw_data is mapping %}
+                        <li>'{{ kw_data.keyword }}' (relevance: {{ '%.1f'|format(kw_data.relevance) }})</li>
+                      {% else %}
+                        <li>'{{ kw_data }}' (relevance: unknown)</li>
+                      {% endif %}
+                    {% endfor %}
+                    </ul>
+                  {% else %}
+                    <div>Keywords analyzed: {{ it.explanation.topic_activity_breakdown.keywords|join(', ') if it.explanation.topic_activity_breakdown.keywords else 'None extracted' }}</div>
+                  {% endif %}
+                  {% if it.explanation.topic_activity_breakdown.breakdown %}
+                    <div>Recent research activity (last 3 years):</div>
+                    <ul style="margin-left:15px;">
+                    {% for item in it.explanation.topic_activity_breakdown.breakdown[:3] %}
+                      <li><strong>'{{ item.keyword }}'</strong>{% if item.relevance is defined %} (relevance: {{ '%.1f'|format(item.relevance) }}){% endif %}: {{ item.num_works }} recent papers, contribution score: {{ '%.1f'|format(item.total_contribution) }}
+                        {% if item.top_publications and item.top_publications|length > 0 %}
+                          <br><em>Representative venues:</em> 
+                          {% set venues = {} %}
+                          {% for pub in item.top_publications[:3] %}
+                            {% set _ = venues.update({pub.venue: (venues[pub.venue] + 1) if pub.venue in venues else 1}) %}
+                          {% endfor %}
+                          {{ venues.keys()|list|join(', ') }}
+                        {% endif %}
+                      </li>
+                    {% endfor %}
+                    </ul>
+                    {% if it.explanation.topic_activity_breakdown.breakdown|length > 3 %}
+                    <div><em>... and {{ it.explanation.topic_activity_breakdown.breakdown|length - 3 }} more keywords analyzed</em></div>
+                    {% endif %}
+                  {% endif %}
+                </div>
               {% endif %}
+            {% else %}
+              <div><strong>Topic Activity Score</strong>: Not available</div>
             {% endif %}
-            <div><strong>Raw signals</strong>:
-              h_index_avg={{ it.explanation.signals.author_h_index_avg | default('None') }},
-              recent_works_avg={{ it.explanation.signals.author_recent_works_avg | default('None') }},
-              topic_activity_score={{ '%.2f'|format(it.explanation.signals.topic_activity_score) }},
-              venue_2y_mean_citedness={{ it.explanation.signals.venue_two_year_mean_citedness | default('None') }},
-              published={{ it.explanation.signals.published }},
-              scoring_method={{ it.explanation.signals.scoring_method }}
+            
+            <div><strong>Quantitative Signals</strong>:
+              Author H-index avg: {{ it.explanation.signals.author_h_index_avg | default('Unknown') }},
+              Author recent works avg: {{ it.explanation.signals.author_recent_works_avg | default('Unknown') }},
+              Venue 2yr mean citedness: {{ it.explanation.signals.venue_two_year_mean_citedness | default('Unknown') }},
+              Published: {{ it.explanation.signals.published }},
+              Method: {{ it.explanation.signals.scoring_method }}
             </div>
-            <div><strong>LLM Score Components</strong>:
-              llm_score={{ '%.2f'|format(it.explanation.components.llm_score | default(0)) }},
-              time_decay={{ '%.3f'|format(it.explanation.components.time_decay | default(1)) }},
-              final_score={{ '%.2f'|format(it.explanation.final_score) }}
+            
+            {% if it.explanation.structured_inputs %}
+            <div><strong>LLM Structured Assessment</strong>:</div>
+            <div style="margin-left:10px; font-size:11px;">
+              Novelty score: {{ '%.2f'|format(it.explanation.structured_inputs.novelty_score) }}/1.0,
+              Author quality: {{ '%.2f'|format(it.explanation.structured_inputs.author_quality_multiplier) }}x,
+              Field activity: {{ '%.2f'|format(it.explanation.structured_inputs.field_activity_multiplier) }}x,
+              Venue quality: {{ '%.2f'|format(it.explanation.structured_inputs.venue_quality_factor) }}x,
+              Reproducibility: {{ '%.2f'|format(it.explanation.structured_inputs.reproducibility_score) }}/1.0,
+              Impact breadth: {{ '%.2f'|format(it.explanation.structured_inputs.impact_breadth) }}/1.0
+            </div>
+            {% endif %}
+            
+            <div><strong>Score Components</strong>:
+              {% if it.explanation.components.fwci_score is defined %}
+                FWCI score: {{ '%.2f'|format(it.explanation.components.fwci_score) }},
+              {% elif it.explanation.components.llm_score is defined %}
+                LLM score: {{ '%.2f'|format(it.explanation.components.llm_score) }},
+              {% endif %}
+              Final score: {{ '%.2f'|format(it.explanation.final_score) }}
             </div>
             {% if it.explanation.llm_reasoning %}
-            <div><strong>LLM Assessment</strong>: {{ it.explanation.llm_reasoning[:300] }}{% if it.explanation.llm_reasoning|length > 300 %}...{% endif %}</div>
+            <div><strong>LLM Impact Assessment</strong>: {{ it.explanation.llm_reasoning }}</div>
             {% endif %}
           </div>
         </details>

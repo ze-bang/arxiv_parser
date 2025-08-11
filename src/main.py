@@ -175,7 +175,7 @@ def run(top_m: int, send_mail: bool, dry_run: bool, date: dt.date | None) -> int
             topic_activity_score=topic_activity_score,
         )
         score = compute_score(sig, e.title, e.summary, e.authors, topic_details)
-        expl = explain_score(sig, score)
+        expl = explain_score(sig, score, topic_details)
         # Always include topic activity score since it's now required
         expl["topic_activity_score"] = topic_activity_score
 
