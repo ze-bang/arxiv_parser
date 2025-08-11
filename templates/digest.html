@@ -17,9 +17,9 @@
     <h2>cond-mat.str-el Daily Digest - {{ date }}</h2>
     
     <div style="background:#f8f9fa; padding:10px; margin-bottom:20px; border-left:4px solid #0055cc; font-size:13px;">
-      <strong>Scoring Methodology:</strong> Papers are ranked using quantitative impact prediction based on Field-Weighted Citation Impact (FWCI) methodology. 
-      Scores integrate author H-index metrics, recent publication patterns, topic activity analysis from keyword-based research trends, 
-      and venue quality indicators. LLM assessment provides comprehensive reasoning without truncation for full transparency.
+  <strong>Scoring Methodology:</strong> Papers are ranked using comprehensive impact metrics: FWCI (field-weighted citation impact), 
+  future citation forecasts (2y/5y/10y), and RCR (relative citation ratio), combined into a composite score. 
+  Signals include author/venue metrics, topic activity, and field priors. LLM narrative is omitted in emails for brevity.
     </div>
     
     {% if items|length == 0 %}
@@ -89,19 +89,17 @@
               Author H-index avg: {{ it.explanation.signals.author_h_index_avg | default('Unknown') }},
               Author recent works avg: {{ it.explanation.signals.author_recent_works_avg | default('Unknown') }},
               Venue 2yr mean citedness: {{ it.explanation.signals.venue_two_year_mean_citedness | default('Unknown') }},
-              Published: {{ it.explanation.signals.published }},
-              Method: {{ it.explanation.signals.scoring_method }}
+              Field: {{ it.field_classification or it.explanation.signals.field_classification or 'Unknown' }},
+              Field prior: {{ '%.2f'|format(it.field_prior_multiplier or it.explanation.signals.field_prior_multiplier or 1.0) }}x,
+              Published: {{ it.explanation.signals.published }}
             </div>
-            
-            {% if it.explanation.structured_inputs %}
-            <div><strong>LLM Structured Assessment</strong>:</div>
-            <div style="margin-left:10px; font-size:11px;">
-              Novelty score: {{ '%.2f'|format(it.explanation.structured_inputs.novelty_score) }}/1.0,
-              Author quality: {{ '%.2f'|format(it.explanation.structured_inputs.author_quality_multiplier) }}x,
-              Field activity: {{ '%.2f'|format(it.explanation.structured_inputs.field_activity_multiplier) }}x,
-              Venue quality: {{ '%.2f'|format(it.explanation.structured_inputs.venue_quality_factor) }}x,
-              Reproducibility: {{ '%.2f'|format(it.explanation.structured_inputs.reproducibility_score) }}/1.0,
-              Impact breadth: {{ '%.2f'|format(it.explanation.structured_inputs.impact_breadth) }}/1.0
+
+            {% if it.explanation.comprehensive_metrics %}
+            <div style="margin-top:6px;"><strong>Impact Metrics</strong>:</div>
+            <div style="margin-left:10px;">
+              <div>Composite: {{ '%.2f'|format(it.explanation.comprehensive_metrics.composite_score) }}, Confidence: {{ it.explanation.comprehensive_metrics.confidence_level }}</div>
+              <div>FWCI: {{ '%.2f'|format(it.explanation.comprehensive_metrics.fwci_score) }}, RCR: {{ '%.2f'|format(it.explanation.comprehensive_metrics.rcr_score) }} ({{ '%.0f'|format(it.explanation.comprehensive_metrics.rcr_percentile) }}th pct)</div>
+              <div>Predicted citations — 2y: {{ '%.1f'|format(it.explanation.comprehensive_metrics.predicted_citations_2y) }}, 5y: {{ '%.1f'|format(it.explanation.comprehensive_metrics.predicted_citations_5y) }}, 10y: {{ '%.1f'|format(it.explanation.comprehensive_metrics.predicted_citations_10y) }}</div>
             </div>
             {% endif %}
             
@@ -113,9 +111,6 @@
               {% endif %}
               Final score: {{ '%.2f'|format(it.explanation.final_score) }}
             </div>
-            {% if it.explanation.llm_reasoning %}
-            <div><strong>LLM Impact Assessment</strong>: {{ it.explanation.llm_reasoning }}</div>
-            {% endif %}
           </div>
         </details>
       </div>
