@@ -573,6 +573,41 @@ def _legacy_projected_citations_for_work(work: dict) -> float:
     return log_normal_projected_citations(impact_factor, years_since)
 
 
+def _extract_venue_name(work: dict) -> str:
+    """
+    Extract venue name from OpenAlex work data.
+    
+    OpenAlex stores venue information in multiple places:
+    1. host_venue.display_name (legacy, may be None)
+    2. locations[0].source.display_name (current format)
+    3. best_oa_location.source.display_name (fallback)
+    
+    Args:
+        work: OpenAlex work dictionary
+    
+    Returns:
+        Venue name or "Unknown venue" if not found
+    """
+    # Try host_venue first (legacy format)
+    host_venue = work.get("host_venue")
+    if host_venue and host_venue.get("display_name"):
+        return host_venue.get("display_name")
+    
+    # Try locations (current format)
+    locations = work.get("locations", [])
+    for location in locations:
+        source = location.get("source")
+        if source and source.get("display_name"):
+            return source.get("display_name")
+    
+    # Try best_oa_location as fallback
+    best_oa = work.get("best_oa_location")
+    if best_oa and best_oa.get("source") and best_oa.get("source", {}).get("display_name"):
+        return best_oa.get("source", {}).get("display_name")
+    
+    return "Unknown venue"
+
+
 def compute_topic_activity_score_with_keywords_detailed(keywords: list[dict], max_works_per_keyword: int = 50) -> tuple[float, list]:
     """
     Compute topic activity score using LLM-generated keywords with relevance scores and return detailed breakdown.
@@ -624,7 +659,7 @@ def compute_topic_activity_score_with_keywords_detailed(keywords: list[dict], ma
                 contribution = projected_cites * decay * relevance
                 
                 # Capture publication details
-                venue_name = work.get("host_venue", {}).get("display_name", "Unknown venue")
+                venue_name = _extract_venue_name(work)
                 pub_year = pub_datetime.year
                 publications_info.append({
                     "venue": venue_name,
