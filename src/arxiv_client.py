@@ -34,9 +34,18 @@ def fetch_submissions_for_date(category: str, date: dt.date) -> List[ArxivEntry]
     )
     feed = feedparser.parse(url)
     results: List[ArxivEntry] = []
+    # Determine UTC constant compatibly
+    try:
+        UTC = dt.UTC  # Python 3.11+
+    except AttributeError:  # pragma: no cover
+        from datetime import timezone as _tz
+        UTC = _tz.utc
     for e in feed.entries:
         categories = [t["term"] for t in getattr(e, "tags", []) if "term" in t]
-        published = dt.datetime(*e.published_parsed[:6]) if getattr(e, "published_parsed", None) else dt.datetime.utcnow()
+        if getattr(e, "published_parsed", None):
+            published = dt.datetime(*e.published_parsed[:6]).replace(tzinfo=UTC)
+        else:
+            published = dt.datetime.now(UTC)
         # arXiv feedparser exposes extra fields under the 'arxiv_' namespace when present
         doi = getattr(e, "arxiv_doi", None)
         journal_ref = getattr(e, "arxiv_journal_ref", None)
@@ -60,5 +69,10 @@ def fetch_daily_submissions(category: str, date: Optional[dt.date] = None) -> Li
     """Backward-compatible wrapper to fetch submissions for a given date.
     If date is None, uses today's UTC date.
     """
-    d = date or dt.datetime.utcnow().date()
+    try:
+        UTC = dt.UTC
+    except AttributeError:  # pragma: no cover
+        from datetime import timezone as _tz
+        UTC = _tz.utc
+    d = date or dt.datetime.now(UTC).date()
     return fetch_submissions_for_date(category, d)

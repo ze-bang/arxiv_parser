@@ -30,9 +30,58 @@
         <div class="summary">
           {{ it.summary }}
         </div>
-        <div class="meta">
-          Components: {{ it.components|tojson }}
-        </div>
+        <details style="margin-top:8px;">
+          <summary style="cursor:pointer;">Scoring breakdown</summary>
+          <div style="font-size:12px; color:#333; margin-top:6px;">
+            {% if it.topic_activity_score is not none %}
+              <div><strong>Topic activity score (new)</strong>: {{ '%.2f'|format(it.topic_activity_score) }}</div>
+              {% if it.explanation.topic_activity_breakdown %}
+                <div>From date: {{ it.explanation.topic_activity_breakdown.from_date }}</div>
+                <div>Per-concept contributions:</div>
+                <ul>
+                  {% for c in it.explanation.topic_activity_breakdown.concepts %}
+                    <li>{{ c.name or c.id }} — weight={{ '%.2f'|format(c.weight) }}, works={{ c.works }}, activity={{ '%.2f'|format(c.activity) }}</li>
+                  {% endfor %}
+                </ul>
+                <div><em>Weighted sum</em>: {{ '%.2f'|format(it.explanation.topic_activity_breakdown.weighted_sum) }}</div>
+              {% endif %}
+            {% endif %}
+            <div><strong>Raw signals</strong>:
+              h_index_avg={{ it.explanation.signals.author_h_index_avg | default('None') }},
+              recent_works_avg={{ it.explanation.signals.author_recent_works_avg | default('None') }},
+              topic_high_cited_3y={{ it.explanation.signals.topic_high_cited_3y | default('None') }},
+              venue_2y_mean_citedness={{ it.explanation.signals.venue_two_year_mean_citedness | default('None') }},
+              published={{ it.explanation.signals.published }}
+            </div>
+            <div><strong>Priors</strong> (mean, std):
+              h_index={{ it.explanation.priors.h_index }},
+              works_5y={{ it.explanation.priors.works_5y }},
+              topic_high_cited_3y={{ it.explanation.priors.topic_high_cited_3y }},
+              venue_2y_mean_citedness={{ it.explanation.priors.venue_2y_mean_citedness }}
+            </div>
+            <div><strong>Z-scores</strong>:
+              author_h_index={{ '%.2f'|format(it.explanation.z.author_h_index) }},
+              author_recent={{ '%.2f'|format(it.explanation.z.author_recent) }},
+              topic={{ '%.2f'|format(it.explanation.z.topic) }},
+              venue={{ '%.2f'|format(it.explanation.z.venue) }}
+            </div>
+            <div><strong>Weights</strong>:
+              author_h_index={{ it.explanation.weights.author_h_index }},
+              author_recent={{ it.explanation.weights.author_recent }},
+              topic={{ it.explanation.weights.topic }},
+              venue={{ it.explanation.weights.venue }}
+            </div>
+            <div><strong>Contributions</strong> (z*weight):
+              author_h_index={{ '%.2f'|format(it.explanation.contributions.author_h_index) }},
+              author_recent={{ '%.2f'|format(it.explanation.contributions.author_recent) }},
+              topic={{ '%.2f'|format(it.explanation.contributions.topic) }},
+              venue={{ '%.2f'|format(it.explanation.contributions.venue) }}
+            </div>
+            <div><strong>Base sum</strong>: {{ '%.2f'|format(it.explanation.base_sum) }}</div>
+            <div><strong>Time decay</strong>: {{ '%.3f'|format(it.explanation.time_decay) }}</div>
+            <div><strong>Final score</strong>: {{ '%.2f'|format(it.explanation.final_score) }}</div>
+          </div>
+        </details>
       </div>
     {% endfor %}
   </body>

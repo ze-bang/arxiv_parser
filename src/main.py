@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-from typing import List
+import logging
+from typing import List, Optional
 
 from .config import config
 from .db import init_db, add_subscriber, remove_subscriber, list_subscribers, mark_seen, filter_unseen
@@ -10,26 +11,27 @@ from .arxiv_client import fetch_daily_submissions
 from .openalex_client import (
     search_author,
     get_author_metrics,
-    search_concept,
-    get_topic_metrics,
     get_venue_metrics_from_doi,
     search_venue_by_name,
     get_venue_metrics,
 )
-from .scoring import PaperSignals, compute_score
+from .scoring import PaperSignals, compute_score, explain_score, compute_paper_topic_activity_score
 from .summarizer import summarize_with_llm
 from .mailer import render_digest, send_email
 
 
-def _infer_concept_query(title: str, categories: list[str]) -> str:
-    # Simple heuristic: use title; categories narrowed already to cond-mat.str-el
-    return title
+logger = logging.getLogger("arxiv_parser")
 
 
 def run(top_m: int, send_mail: bool, dry_run: bool, date: dt.date | None) -> int:
     init_db()
 
-    target_date = date or dt.datetime.utcnow().date()
+    try:
+        UTC = dt.UTC
+    except AttributeError:  # pragma: no cover
+        from datetime import timezone as _tz
+        UTC = _tz.utc
+    target_date = date or dt.datetime.now(UTC).date()
     entries = fetch_daily_submissions(config.category, target_date)
     if not entries:
         if dry_run:
@@ -50,40 +52,103 @@ def run(top_m: int, send_mail: bool, dry_run: bool, date: dt.date | None) -> int
     published_by_id = {e.id: e.published.date().isoformat() for e in entries}
 
     # Compute scores
+    def _positional_weights(n: int) -> list[float]:
+        if n <= 0:
+            return []
+        if n == 1:
+            return [1.0]
+        if n == 2:
+            return [0.6, 0.4]
+        if n == 3:
+            return [0.45, 0.25, 0.30]
+        # n >= 4
+        first, second, last = 0.40, 0.20, 0.25
+        middle_total = 1.0 - (first + second + last)  # 0.15
+        mids = n - 3
+        per_mid = middle_total / mids
+        w = [0.0] * n
+        w[0] = first
+        w[1] = second
+        w[-1] = last
+        for i in range(2, n - 1):
+            w[i] = per_mid
+        return w
+
     for e in entries:
-        metrics = []
-        h_vals = []
-        w_vals = []
-        for a in e.authors[:8]:  # cap number of authors to query
+        names = e.authors
+        n = len(names)
+        # Choose which authors to query: always include first, second (if exists), and last; fill with early middles up to cap
+        CAP = 10
+        idxs: list[int] = []
+        if n >= 1:
+            idxs.append(0)
+        if n >= 2:
+            idxs.append(1)
+        if n >= 3:
+            if (n - 1) not in idxs:
+                idxs.append(n - 1)
+        # Fill remaining slots with 2..n-2
+        for i in range(2, max(2, n - 1)):
+            if len(idxs) >= CAP:
+                break
+            if i not in idxs and i < n - 1:
+                idxs.append(i)
+
+        # Fetch metrics for selected indices
+        per_author_h: list[Optional[float]] = [None] * n
+        per_author_w5y: list[Optional[float]] = [None] * n
+        for i in idxs:
+            a = names[i]
+            logger.debug("[OpenAlex] Searching author@%d: %s", i, a)
             if a not in author_cache:
                 aid = search_author(a)
+                if aid:
+                    logger.debug("[OpenAlex] Author found: %s -> %s", a, aid)
                 if aid:
                     try:
                         mets = get_author_metrics(aid)
                         author_cache[a] = (aid, {"h": mets.h_index, "w5y": mets.works_count_5y})
+                        logger.debug(
+                            "[OpenAlex] Metrics for %s (id=%s): h_index=%s, works_5y=%s",
+                            a,
+                            aid,
+                            mets.h_index,
+                            mets.works_count_5y,
+                        )
                     except Exception:
+                        logger.debug("[OpenAlex] Failed to fetch metrics for %s (id=%s)", a, aid, exc_info=True)
                         author_cache[a] = (aid, {"h": None, "w5y": None})
                 else:
+                    logger.debug("[OpenAlex] No author match for: %s", a)
                     author_cache[a] = (None, {"h": None, "w5y": None})
             _, m = author_cache[a]
-            if m.get("h") is not None:
-                h_vals.append(float(m["h"]))
-            if m.get("w5y") is not None:
-                w_vals.append(float(m["w5y"]))
+            per_author_h[i] = float(m["h"]) if m.get("h") is not None else None
+            per_author_w5y[i] = float(m["w5y"]) if m.get("w5y") is not None else None
 
-        h_avg = sum(h_vals) / len(h_vals) if h_vals else None
-        w_avg = sum(w_vals) / len(w_vals) if w_vals else None
+        weights = _positional_weights(n)
+        # Renormalize weights over authors with available metric values
+        def _weighted_avg(values: list[Optional[float]]) -> Optional[float]:
+            pairs = [(v, weights[i]) for i, v in enumerate(values) if v is not None and i < len(weights)]
+            if not pairs:
+                return None
+            wsum = sum(w for _, w in pairs)
+            if wsum <= 0:
+                return None
+            return sum(v * w for v, w in pairs) / wsum
 
-        # Topic metrics via concept search
-        topic_query = _infer_concept_query(e.title, e.categories)
-        topic_id = None
-        topic_high_cited = None
+        h_avg = _weighted_avg(per_author_h)
+        w_avg = _weighted_avg(per_author_w5y)
+        logger.debug("[Score] Author weights=%s | h_avg=%.3f | w5y_avg=%.3f", weights, h_avg or -1.0, w_avg or -1.0)
+
+        # Topic activity score using LLM-generated keywords
+        topic_activity_score = 0.0
         try:
-            topic_id = search_concept(topic_query)
-            if topic_id:
-                topic_high_cited = get_topic_metrics(topic_id).high_cited_papers_3y
-        except Exception:
-            topic_high_cited = None
+            # Use new LLM-based keyword extraction and scoring
+            topic_activity_score = compute_paper_topic_activity_score(e.title, e.abstract)
+            logger.debug("[Score] Topic activity score=%.3f (LLM keywords)", topic_activity_score)
+        except Exception as ex:
+            logger.warning("[Score] Topic activity scoring failed: %s", ex)
+            topic_activity_score = 0.0
 
         # Venue metrics if possible
         venue_metric = None
@@ -103,11 +168,14 @@ def run(top_m: int, send_mail: bool, dry_run: bool, date: dt.date | None) -> int
         sig = PaperSignals(
             author_h_index_avg=h_avg,
             author_recent_works_avg=w_avg,
-            topic_high_cited_3y=topic_high_cited,
             venue_two_year_mean_citedness=venue_metric,
             published=e.published,
+            topic_activity_score=topic_activity_score,
         )
         score = compute_score(sig)
+        expl = explain_score(sig)
+        # Always include topic activity score since it's now required
+        expl["topic_activity_score"] = topic_activity_score
 
         items.append(
             {
@@ -119,6 +187,8 @@ def run(top_m: int, send_mail: bool, dry_run: bool, date: dt.date | None) -> int
                 "components": score.components,
                 "score": score.raw,
                 "abstract": e.summary,
+                "explanation": expl,
+                "topic_activity_score": topic_activity_score,
             }
         )
 
@@ -160,6 +230,7 @@ def cli():
         default=None,
         help="Fetch submissions for YYYY-MM-DD (UTC); defaults to today",
     )
+    p.add_argument("--debug", action="store_true", help="Enable debug logging (OpenAlex lookups, etc.)")
     p.add_argument("--dry-run", action="store_true", help="Do not send emails or mark seen")
 
     sp_add = sub.add_parser("subscribe", help="Add a subscriber email")
@@ -171,6 +242,10 @@ def cli():
     args = p.parse_args()
 
     init_db()
+    logging.basicConfig(
+        level=logging.DEBUG if args.debug else logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
 
     if args.cmd == "subscribe":
         ok = add_subscriber(args.email)
