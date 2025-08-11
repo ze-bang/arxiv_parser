@@ -1,7 +1,7 @@
-requests
-feedparser
-python-dotenv
-openai
-beautifulsoup4
-scholarly
-google-api-python-client
+requests>=2.31.0
+feedparser>=6.0.11
+python-dotenv>=1.0.1
+openai>=1.37.0
+tenacity>=8.3.0
+pydantic>=2.8.2
+Jinja2>=3.1.4

@@ -1,102 +1,94 @@
-# arXiv Paper Impact Analyzer
+# arxiv_parser
 
-A Python tool that fetches daily condensed matter physics papers from arXiv, analyzes their potential impact using author metrics and topic prevalence, and provides summaries of the most promising papers.
+Daily fetch of arXiv cond-mat.str-el submissions, impact ranking, LLM summaries, and email digests.
 
 ## Features
+- Pulls daily submissions from arXiv category `cond-mat.str-el`
+- Computes an impact score combining:
+  - Author influence (OpenAlex h-index, recent publications)
+  - Topic prevalence (recent highly cited works in inferred concepts)
+  - Venue impact proxy (OpenAlex 2-year mean citedness for the journal, if available)
+  - Exponential time decay (time constant τ = 1.5 years)
+- Summarizes top-m papers with an LLM (OpenAI by default; falls back to simple summaries if no key)
+- Email subscription: send HTML digest via SMTP
+- SQLite persistence for dedup and subscriber management
 
-- **Automated Paper Fetching**: Downloads the latest papers from arXiv's `cond-mat.str-el` category
-- **Author Analysis**: Uses Google Scholar to gather author h-index and publication history
-- **Topic Prevalence Analysis**: Uses Google Custom Search to assess research topic popularity with:
-  - High-impact journal detection (3x boost for Nature, Science, PRL, etc.)
-  - Exponential time decay (1-year time constant)
-- **AI-Powered Summarization**: Uses OpenAI GPT to generate impact scores and paper summaries
-- **Smart Ranking**: Ranks papers by potential impact and displays top candidates
-
-## Setup
-
-### 1. Install Dependencies
-
-```bash
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate
-
-# Install packages
+## Quick start
+1) Python env
+```
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. API Keys Setup
+2) Configure environment (create `.env` or export env vars):
+- Optional LLM:
+  - `OPENAI_API_KEY` – your OpenAI key
+  - `OPENAI_MODEL` – default `gpt-4o-mini`
+- OpenAlex: no key required (public API), but respect rate limits.
+- SMTP (for email):
+  - `SMTP_HOST`, `SMTP_PORT` (e.g. 587), `SMTP_USER`, `SMTP_PASS`
+  - `EMAIL_FROM` (display address)
+  - Or use Resend: `RESEND_API_KEY`, `RESEND_FROM` (or reuse `EMAIL_FROM`)
+- App config:
+  - `TOP_M` (default 5)
 
-You'll need to set up API keys for:
-
-#### OpenAI API
-1. Go to [OpenAI API](https://platform.openai.com/api-keys)
-2. Create a new API key
-3. Add it to your `.env` file
-
-#### Google Custom Search API
-1. **Create a Google Cloud Project**:
-   - Go to [Google Cloud Console](https://console.cloud.google.com/)
-   - Create a new project or select existing one
-
-2. **Enable Custom Search API**:
-   - Go to APIs & Services > Library
-   - Search for "Custom Search API"
-   - Click and enable it
-
-3. **Get API Key**:
-   - Go to APIs & Services > Credentials
-   - Click "Create Credentials" > "API Key"
-   - Copy the API key
-
-4. **Create Custom Search Engine**:
-   - Go to [Google Custom Search](https://cse.google.com/)
-   - Click "New search engine"
-   - Add `*.arxiv.org`, `*.nature.com`, `*.science.org` as sites to search
-   - Click "Create"
-   - Get the "Search engine ID" from the setup page
-
-5. **Update .env file**:
-```bash
-OPENAI_API_KEY="your_openai_api_key_here"
-GOOGLE_API_KEY="your_google_api_key_here"
-GOOGLE_SEARCH_ENGINE_ID="your_search_engine_id_here"
+Example `.env`:
+```
+OPENAI_API_KEY=sk-...
+OPENAI_MODEL=gpt-4o-mini
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=your@email.com
+SMTP_PASS=app-password-or-pass
+EMAIL_FROM=CondMat Digest <your@email.com>
+TOP_M=5
 ```
 
-### 3. Usage
-
-```bash
-# Activate virtual environment
-source venv/bin/activate
-
-# Run the analyzer
-python src/arxiv_analyzer.py
+3) Run once (dry run prints to console, no emails)
+```
+python -m src.main --dry-run --top 5
 ```
 
-## How It Works
+4) Subscribe an email and send
+```
+python -m src.main subscribe --email you@example.com
+python -m src.main --top 5 --send-email
+```
 
-1. **Paper Fetching**: Connects to arXiv API to get latest `cond-mat.str-el` submissions
-2. **Author Analysis**: For each author, queries Google Scholar for h-index and recent publications
-3. **Topic Analysis**: Uses Google Custom Search to find related papers and assess topic prevalence
-4. **Impact Scoring**: Combines author metrics, topic prevalence, journal impact factor, and recency
-5. **AI Summary**: Uses GPT to generate impact scores (1-10) and paper summaries
-6. **Ranking**: Sorts papers by impact score and displays top results
+## Fetch by date
+Pull any UTC date instead of today:
+```
+python -m src.main --dry-run --top 5 --date 2025-08-01
+```
 
-## Configuration
+## Scheduling
+Use cron to run daily (UTC morning). Example crontab:
+```
+0 9 * * * cd /home/pc_linux/arxiv_parser && . .venv/bin/activate && python -m src.main --top 5 --send-email >> logs/run.log 2>&1
+```
 
-- **Number of papers to analyze**: Modify `max_results` in `get_arxiv_papers()`
-- **Number of top papers to display**: Change the `m` parameter in `main(m=5)`
-- **Journal impact list**: Update `high_impact_journals` in `get_topic_prevalence()`
-- **Time decay factor**: Modify the exponential decay formula in `get_topic_prevalence()`
+## Notes
+- OpenAlex is used for author h-index, recent works, venue metrics, and topic concept stats. Journal Impact Factor is proprietary; we use OpenAlex 2yr mean citedness as a proxy.
+- If no LLM key is set, summaries fall back to a simple 2-3 sentence abstract-based summary.
+- Time decay uses τ = 1.5 years: weight = exp(-age_days / (365*1.5)).
 
-## API Limits
+## Vercel front-end (subscriptions)
+- A minimal Next.js app lives in `web/` for Vercel deployment with a subscription form.
+- Backed by Vercel Postgres. Set DB env vars in Vercel.
+- API routes:
+  - `POST /api/subscribe` { email }
+  - `POST /api/unsubscribe` { email }
+  - `GET /api/subscribers` -> { subscribers: string[] }
+- To have the Python app use Vercel’s list for emailing, set:
+  - `SUBSCRIBERS_URL=https://<your-vercel-app>.vercel.app/api/subscribers`
 
-- **Google Custom Search**: 100 free searches per day
-- **OpenAI**: Pay-per-use based on your plan
-- **Google Scholar**: No official API, uses `scholarly` library (may have rate limits)
+## Development
+- Code lives under `src/`
+- DB is `data/app.db`
+- Env vars via `.env` (optional)
 
 ## Troubleshooting
-
-- **Google API errors**: Check that Custom Search API is enabled and your quotas
-- **Scholar timeouts**: The `scholarly` library may hit rate limits; the script will continue with available data
-- **OpenAI errors**: Verify your API key and account has sufficient credits
+- Rate limits: add small sleeps for OpenAlex queries; this app already batches calls where possible.
+- Email sending issues: check SMTP credentials, ports, and allow “less secure app” or app passwords as needed.
+- If arXiv API returns fewer results, the category may have zero submissions that day.
