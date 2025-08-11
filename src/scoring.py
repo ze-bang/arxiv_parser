@@ -144,9 +144,15 @@ def compute_score_with_llm(sig: PaperSignals, title: str, abstract: str, authors
     field_info = f"Field Classification: {sig.field_classification or 'Unknown'}"
     field_prior_info = f"Field Prior Multiplier: {sig.field_prior_multiplier:.2f} (accounts for baseline citation patterns in this field)"
     
-    prompt = f"""You are a scientific impact assessment expert. Analyze this paper and provide structured quantitative inputs for Field-Weighted Citation Impact (FWCI) calculation.
+    prompt = f"""You are a scientific impact assessment expert. Analyze this paper and provide structured quantitative inputs for a comprehensive citation impact calculation.
 
-DO NOT provide a final score. Instead, provide specific numerical assessments for each factor that will be used in an evidence-based citation prediction model.
+The system calculates multiple metrics:
+- FWCI (Field-Weighted Citation Impact): Compares citations to field baseline
+- Future Citation Predictions: 2, 5, and 10-year citation forecasts using temporal models
+- RCR (Relative Citation Ratio): Percentile ranking within field and timeframe
+- Composite Score: Weighted combination of all metrics
+
+DO NOT provide a final score. Instead, provide specific numerical assessments for each factor that will be used in the comprehensive citation prediction model.
 
 Title: {title}
 
@@ -201,7 +207,13 @@ Provide numerical assessments (0.0-1.0 scale unless specified) for these factors
    - 0.6-0.8: Good cross-field applicability
    - 0.9-1.0: Broad impact across multiple fields
 
-NOTE: The field prior multiplier of {sig.field_prior_multiplier:.2f} will be automatically applied based on the field's typical citation patterns. Focus on assessing the paper's quality within its field.
+NOTE: The system will automatically calculate:
+- FWCI relative to field baseline ({sig.field_prior_multiplier:.2f}x for {sig.field_classification or 'this field'})
+- Future citation predictions (2, 5, 10 years) using temporal growth models
+- RCR percentile ranking within the field
+- Composite score combining all metrics
+
+Focus on assessing the paper's intrinsic quality factors listed above.
 
 Provide your assessment as:
 REASONING: [Detailed quantitative reasoning for each factor]
@@ -235,7 +247,8 @@ IMPACT_BREADTH: [0.0-1.0]
         
         # Create components for transparency
         components = {
-            "fwci_score_pre_field": fwci_score,
+            "comprehensive_score": field_adjusted_score,
+            "base_score_pre_field": fwci_score,
             "field_adjusted_score": field_adjusted_score,
             "field_classification": sig.field_classification,
             "field_prior_multiplier": sig.field_prior_multiplier,
@@ -245,6 +258,12 @@ IMPACT_BREADTH: [0.0-1.0]
             "topic_activity": sig.topic_activity_score,
             "llm_reasoning": response_text
         }
+        
+        # Include comprehensive metrics if available
+        if 'comprehensive_metrics' in structured_inputs:
+            components.update(structured_inputs['comprehensive_metrics'])
+            # Remove from structured_inputs to avoid duplication
+            del structured_inputs['comprehensive_metrics']
         
         return PaperScore(raw=field_adjusted_score, components=components)
         
@@ -298,9 +317,9 @@ def _extract_structured_inputs_from_llm_response(response_text: str) -> dict:
 
 
 def _calculate_fwci_from_structured_inputs(inputs: dict, sig: PaperSignals) -> float:
-    """Calculate FWCI score using structured inputs from LLM and empirical data."""
+    """Calculate comprehensive score using FWCI, future citations, and RCR."""
     try:
-        from .citation_models import CitationPredictor, CitationPredictionInputs
+        from .citation_models import ComprehensiveCitationPredictor, CitationPredictionInputs
         
         # Convert our data to citation model inputs
         citation_inputs = CitationPredictionInputs(
@@ -312,10 +331,12 @@ def _calculate_fwci_from_structured_inputs(inputs: dict, sig: PaperSignals) -> f
             years_since_publication=0.1  # New paper
         )
         
-        # Use ensemble model for base prediction
-        base_prediction, model_components = CitationPredictor.ensemble_model(citation_inputs)
+        # Get comprehensive metrics including FWCI, future predictions, and RCR
+        comprehensive_metrics = ComprehensiveCitationPredictor.predict_comprehensive_metrics(
+            citation_inputs, sig.field_classification
+        )
         
-        # Apply LLM-derived multipliers
+        # Apply LLM-derived multipliers to the composite score
         author_multiplier = inputs.get('author_quality_multiplier', 1.0)
         field_multiplier = inputs.get('field_activity_multiplier', 1.0)
         venue_multiplier = inputs.get('venue_quality_factor', 1.0)
@@ -324,8 +345,8 @@ def _calculate_fwci_from_structured_inputs(inputs: dict, sig: PaperSignals) -> f
         reproducibility = inputs.get('reproducibility_score', 0.5)
         impact_breadth = inputs.get('impact_breadth', 0.5)
         
-        # Combine multipliers - be conservative to avoid overestimation
-        combined_multiplier = (
+        # Combine multipliers with the comprehensive score
+        multiplier_adjustment = (
             author_multiplier * 0.3 +
             field_multiplier * 0.3 +
             venue_multiplier * 0.2 +
@@ -333,22 +354,32 @@ def _calculate_fwci_from_structured_inputs(inputs: dict, sig: PaperSignals) -> f
             (1 + impact_breadth * 0.5) * 0.1
         )
         
-        # Convert predicted citations to FWCI equivalent
-        # FWCI of 1.0 = expected citations for field
-        # Assume baseline expected citations ~ 5-10 for typical papers
-        expected_citations_baseline = 7.0
-        fwci_score = (base_prediction * combined_multiplier) / expected_citations_baseline
+        # Use composite score as base and apply multipliers
+        final_score = comprehensive_metrics.composite_score * multiplier_adjustment
         
-        # Cap at reasonable FWCI range (0.1 to 5.0)
-        return max(0.1, min(5.0, fwci_score))
+        # Store comprehensive metrics for transparency
+        inputs['comprehensive_metrics'] = {
+            'fwci_score': comprehensive_metrics.fwci_score,
+            'predicted_citations_2y': comprehensive_metrics.predicted_citations_2y,
+            'predicted_citations_5y': comprehensive_metrics.predicted_citations_5y,
+            'predicted_citations_10y': comprehensive_metrics.predicted_citations_10y,
+            'rcr_score': comprehensive_metrics.rcr_score,
+            'rcr_percentile': comprehensive_metrics.rcr_percentile,
+            'composite_score': comprehensive_metrics.composite_score,
+            'confidence_level': comprehensive_metrics.confidence_level,
+            'component_scores': comprehensive_metrics.component_scores
+        }
+        
+        # Cap at reasonable range (0.1 to 10.0)
+        return max(0.1, min(10.0, final_score))
         
     except ImportError:
         # Fallback calculation if citation_models not available
         logger = logging.getLogger("arxiv_parser")
-        logger.warning("Citation models not available, using simplified calculation")
+        logger.warning("Comprehensive citation models not available, using simplified calculation")
         
         # Simple calculation based on LLM inputs
-        base_score = 1.0  # Neutral FWCI
+        base_score = 1.0  # Neutral baseline
         
         # Apply multipliers
         novelty_factor = 1 + inputs.get('novelty_score', 0.5)
@@ -358,7 +389,7 @@ def _calculate_fwci_from_structured_inputs(inputs: dict, sig: PaperSignals) -> f
         
         combined_score = base_score * novelty_factor * author_factor * field_factor * venue_factor * 0.5
         
-        return max(0.1, min(5.0, combined_score))
+        return max(0.1, min(10.0, combined_score))
 
 
 def _extract_score_from_llm_response(response_text: str) -> float:
@@ -1077,18 +1108,19 @@ def compute_topic_activity_score(works: Iterable[dict]) -> float:
 
 
 def explain_score(sig: PaperSignals, score_result: PaperScore, topic_details: dict = None) -> dict:
-    """Return explanation of the improved LLM-based score calculation with field prior for templating.
+    """Return explanation of the comprehensive scoring system including FWCI, future citations, and RCR.
 
     Structure:
     {
       'signals': {... raw values including field info ...},
-      'components': {... score components ...},
+      'components': {... score components including comprehensive metrics ...},
       'final_score': float,
       'llm_reasoning': str (if available),
       'structured_inputs': dict (if available),
       'topic_activity_breakdown': dict (if available),
       'field_classification': str (if available),
-      'field_prior_multiplier': float
+      'field_prior_multiplier': float,
+      'comprehensive_metrics': dict (if available) - FWCI, future predictions, RCR
     }
     """
     
@@ -1101,7 +1133,7 @@ def explain_score(sig: PaperSignals, score_result: PaperScore, topic_details: di
             "topic_activity_score": sig.topic_activity_score,
             "field_classification": sig.field_classification,
             "field_prior_multiplier": sig.field_prior_multiplier,
-            "scoring_method": "llm_structured_fwci_with_field_prior",
+            "scoring_method": "comprehensive_fwci_future_rcr_with_field_prior",
         },
         "components": score_result.components,
         "final_score": score_result.raw,
@@ -1116,6 +1148,16 @@ def explain_score(sig: PaperSignals, score_result: PaperScore, topic_details: di
     # Include structured inputs if available
     if "structured_inputs" in score_result.components:
         explanation["structured_inputs"] = score_result.components["structured_inputs"]
+    
+    # Include comprehensive metrics summary
+    comprehensive_summary = {}
+    for key in ['fwci_score', 'predicted_citations_2y', 'predicted_citations_5y', 'predicted_citations_10y', 
+                'rcr_score', 'rcr_percentile', 'composite_score', 'confidence_level']:
+        if key in score_result.components:
+            comprehensive_summary[key] = score_result.components[key]
+    
+    if comprehensive_summary:
+        explanation["comprehensive_metrics"] = comprehensive_summary
     
     # Include topic activity breakdown if available
     if topic_details:
