@@ -1,3 +1,11 @@
+Metadata-Version: 2.4
+Name: arxiv-cite-forecast
+Version: 0.1.0
+Summary: Predict 12-month citations for arXiv papers
+Author: Your Name
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+
 # arxiv-citation-forecast
 
 Predict 12-month citations for newly submitted arXiv papers using text and metadata. Includes:
