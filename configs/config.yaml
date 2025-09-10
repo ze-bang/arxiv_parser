@@ -1,0 +1,58 @@
+# Default configuration for citation prediction models
+defaults:
+  - _self_
+
+# Data configuration
+data:
+  category: "cs.LG"
+  start_date: "2021-01-01"
+  end_date: "2022-12-31"
+  limit: 1000
+  train_test_split: 0.8
+
+# Model configuration  
+model:
+  type: "advanced"  # baseline, advanced
+  text_encoder: "transformer"  # tfidf, transformer, hybrid
+  use_graph_features: true
+  horizons: [6, 12, 24]
+  random_state: 42
+
+# Text encoder settings
+text:
+  model_name: "sentence-transformers/all-MiniLM-L12-v2"
+  max_features: 20000  # for TF-IDF fallback
+  n_components: 256    # for SVD/embedding dim
+
+# Graph features
+graph:
+  enable_centrality: true
+  enable_clustering: true
+  cutoff_days_before: 365  # only use co-author data from X days before submission
+
+# Training settings
+training:
+  test_size: 0.2
+  val_size: 0.1
+  cross_validation: false
+  cv_folds: 5
+
+# Evaluation
+evaluation:
+  ranking_metrics: true
+  uncertainty_metrics: true
+  explanation_samples: 100
+  ndcg_k_values: [10, 20, 50]
+
+# MLflow tracking
+mlflow:
+  experiment_name: "arxiv_citation_forecast"
+  tracking_uri: "mlruns"  # local directory
+  log_model: true
+  log_artifacts: true
+
+# Output paths
+output:
+  model_dir: "models"
+  results_dir: "results"
+  cache_dir: "data_cache"

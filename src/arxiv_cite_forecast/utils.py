@@ -53,4 +53,5 @@ class Cache:
 
     def set(self, key: str, value: dict) -> None:
         p = self._path(key)
+        p.parent.mkdir(parents=True, exist_ok=True)  # Ensure parent directories exist
         p.write_text(json.dumps(value, ensure_ascii=False))

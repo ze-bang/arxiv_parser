@@ -1,0 +1,16 @@
+# Configuration for fast baseline model
+defaults:
+  - config.yaml
+
+model:
+  type: "baseline"
+  text_encoder: "tfidf"
+  use_graph_features: false
+  horizons: [12]
+
+text:
+  max_features: 5000
+  n_components: 128
+
+data:
+  limit: 200  # smaller for quick testing
